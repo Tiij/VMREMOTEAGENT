@@ -1,0 +1,48 @@
+# ============================================================
+# Caddyfile — reverse proxy HTTPS
+#   /       → CloudCLI  :3001   (UI multi-agents)
+#   /ide/   → code-server :8080 (VS Code web)
+# ============================================================
+# Si tu as un domaine (ex: agents.mondomaine.tld), remplace
+# ":80, :443" par ton domaine → certificat Let's Encrypt auto.
+# ============================================================
+
+:80, :443 {
+    request_body { max_size 500MB }
+
+    # ---------- code-server (VS Code web) sur /ide/ ----------
+    handle_path /ide/* {
+        rewrite /ide/* /{uri_slice[2:]}
+        reverse_proxy cloudcli:8080 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Prefix /ide/
+            header_up Upgrade {>Upgrade}
+            header_up Connection {>Connection}
+            transport http { response_header_timeout 0 }
+        }
+    }
+
+    # ---------- CloudCLI à la racine ----------
+    handle /* {
+        reverse_proxy cloudcli:3001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up Upgrade {>Upgrade}
+            header_up Connection {>Connection}
+            transport http { response_header_timeout 0 }
+        }
+    }
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    tls internal
+    flush_interval -1
+}
