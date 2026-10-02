@@ -16,7 +16,7 @@
 set -euo pipefail
 
 # ==================== Version de cette release ====================
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.2.0"
 STATE_FILE=".vmremoteagent.state"
 META_FILE="MANIFEST.txt"
 HEALTH_TIMEOUT=30
@@ -515,6 +515,7 @@ footer{margin-top:56px;text-align:center;color:var(--text-dim);font-size:13px}
 <a class="card" href="#" onclick="alert('📸 Snapshot manuel :\n\n  cd /opt/multi-agents && ./scripts/snapshot.sh <nom>\n\nRestauration : ./scripts/restore.sh <nom>');return false;"><div class="icon i-green">💾</div><h3>Sauvegarder</h3><p>Créez un snapshot instantané de toute la stack avant une mission risquée.</p><div class="meta"><span class="dot orange"></span> Terminal<span class="arrow">→</span></div></a>
 <a class="card" href="#" onclick="alert('🩺 Diagnostic et réparation automatique :\n\n  cd /opt/multi-agents && ./scripts/doctor.sh\n\nPour réparer automatiquement :\n\n  ./scripts/doctor.sh --fix\n\n(Aperçu rapide : ./scripts/status.sh).');return false;"><div class="icon i-indigo">📊</div><h3>État / Réparer</h3><p>Diagnostique automatiquement la stack et répare les fichiers, conteneurs ou config cassés.</p><div class="meta"><span class="dot"></span> Doctor · auto-réparation<span class="arrow">→</span></div></a>
 <a class="card" href="https://github.com/Tiij/VMREMOTEAGENT" target="_blank" rel="noopener"><div class="icon i-gray">📘</div><h3>Documentation</h3><p>README, guide d'installation, commandes utiles et dépannage sur GitHub.</p><div class="meta"><span class="dot orange"></span> GitHub<span class="arrow">↗</span></div></a>
+<a class="card" href="#" onclick="alert('🚀 Mettre à jour VMREMOTEAGENT :\n\n  cd /opt/multi-agents && sudo ./scripts/update.sh\n\nVérifier seulement (sans modifier) :\n\n  sudo ./scripts/update.sh --check\n\nLe script sauvegarde automatiquement avant la MAJ et fait un rollback si la nouvelle version ne démarre pas.');return false;"><div class="icon i-orange">🚀</div><h3>Mettre à jour</h3><p>Vérifie si une nouvelle version est disponible (channel stable), sauvegarde, met à jour, avec rollback automatique si problème.</p><div class="meta"><span class="dot orange" id="upd-dot"></span> 1 commande<span class="arrow">→</span></div></a>
 </main>
 <footer><span id="foot">VMREMOTEAGENT</span> · CloudCLI + code-server + Caddy · backend Ollama Cloud</footer></div>
 <script>
@@ -653,14 +654,75 @@ SIZE=$(du -sh backups|cut -f1);CNT=$(ls -1 backups/*.tar.gz 2>/dev/null|wc -l);l
 EOS
 
 write_script "$INSTALL_DIR/scripts/status.sh" 755 <<'EOS'
-#!/usr/bin/env bash;set -euo pipefail;cd "$(dirname "${BASH_SOURCE[0]}")/.."
-G="\033[0;32m";R="\033[0;31m";Y="\033[0;33m";NC="\033[0m";ok(){ echo -e "  ${G}✔${NC} $*";};warn(){ echo -e "  ${Y}⚠${NC} $*";};bad(){ echo -e "  ${R}✘${NC} $*";}
-echo "🌐 VMREMOTEAGENT — status";echo
-if docker compose ps --services >/dev/null 2>&1;then R=$(docker compose ps --status running --format '{{.Name}}'|wc -l);T=$(docker compose ps --services|wc -l);[ "$R" -eq "$T" ]&&ok "Stack: $R/$T Up"||warn "Stack: $R/$T Up";docker compose ps;else bad "Stack inaccessible";fi;echo
-[ -L /etc/cron.daily/cloudcli-snapshot ]&&ok "Cron: $(readlink -f /etc/cron.daily/cloudcli-snapshot)"||warn "Cron absent"
-[ -f /var/log/cloudcli-snapshot.log ]&&{ LAST=$(tail -n 20 /var/log/cloudcli-snapshot.log|grep -E "terminé|snapshot auto OK"|tail -n1);[ -n "$LAST" ]&&ok "Dernier backup: $LAST";};echo
-if ls backups/*.tar.gz >/dev/null 2>&1;then N=$(ls -1 backups/*.tar.gz|wc -l);S=$(du -sh backups|cut -f1);ok "$N snapshots ($S)";ls -lht backups/*.tar.gz|head -n10|awk '{printf "   %-6s %-20s %s\n",$5,$6" "$7" "$8,$9}';else warn "Aucun snapshot. ./scripts/snapshot.sh test";fi
-echo;IP=$(hostname -I 2>/dev/null|awk '{print $1}');echo "🔗 https://${IP:-<IP>}/   •   https://${IP:-<IP>}/ide/   •   https://${IP:-<IP>}:3001/"
+#!/usr/bin/env bash
+# ------------------------------------------------------------
+# status.sh  —  Affiche l'état de la stack et des sauvegardes.
+# Usage : ./scripts/status.sh
+# ------------------------------------------------------------
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+GREEN="\033[0;32m"; RED="\033[0;31m"; YEL="\033[0;33m"; RST="\033[0m"
+
+ok()   { echo -e "  ${GREEN}✔${RST} $*"; }
+warn() { echo -e "  ${YEL}⚠${RST} $*"; }
+bad()  { echo -e "  ${RED}✘${RST} $*"; }
+
+echo "🌐 CloudCLI / multi-agents — status"
+echo
+
+# --- Docker stack ---
+if docker compose ps --services >/dev/null 2>&1; then
+  RUNNING=$(docker compose ps --status running --format '{{.Name}}' | wc -l)
+  TOTAL=$(docker compose ps --services | wc -l)
+  if [ "$RUNNING" -eq "$TOTAL" ]; then
+    ok "Docker stack : $RUNNING/$TOTAL conteneurs en cours d'exécution"
+  else
+    warn "Docker stack : $RUNNING/$TOTAL conteneurs en cours d'exécution"
+  fi
+  docker compose ps
+else
+  bad "Docker stack : inaccessible (vérifie Docker / docker compose)"
+fi
+echo
+
+# --- Sauvegarde auto (cron) ---
+if [ -L /etc/cron.daily/cloudcli-snapshot ]; then
+  TARGET=$(readlink -f /etc/cron.daily/cloudcli-snapshot)
+  ok "Sauvegarde automatique (cron.daily) : $TARGET"
+else
+  warn "Pas de lien /etc/cron.daily/cloudcli-snapshot (lance sudo install.sh pour le recréer)"
+fi
+
+if [ -f /var/log/cloudcli-snapshot.log ]; then
+  LAST=$(tail -n 20 /var/log/cloudcli-snapshot.log | grep "Terminé\|snapshot auto OK" | tail -n1)
+  if [ -n "$LAST" ]; then
+    ok "Dernier snapshot auto : $LAST"
+  fi
+else
+  warn "Fichier de log /var/log/cloudcli-snapshot.log absent (le cron n'a pas encore tourné)"
+fi
+echo
+
+# --- Snapshots existants ---
+if ls backups/*.tar.gz >/dev/null 2>&1; then
+  N=$(ls -1 backups/*.tar.gz | wc -l)
+  SIZE=$(du -sh backups | cut -f1)
+  ok "Snapshots présents : $N archives dans backups/ ($SIZE)"
+  echo
+  ls -lht backups/*.tar.gz | head -n 10 | awk '{printf "   %-6s %-20s %s\n", $5, $6" "$7" "$8, $9}'
+else
+  warn "Aucun snapshot dans backups/ pour le moment."
+  echo "   Pour en créer un tout de suite : ./scripts/snapshot.sh test"
+fi
+echo
+
+# --- Rappel des URLs ---
+IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+echo "🔗 URLs (depuis un navigateur) :"
+echo "   CloudCLI    : https://${IP:-<IP-de-la-VM>}/"
+echo "   code-server : https://${IP:-<IP-de-la-VM>}/ide/"
+
 EOS
 
 write_script "$INSTALL_DIR/scripts/doctor.sh" 755 <<'EOS'
@@ -1020,6 +1082,8 @@ echo -e "   supprimez 'tls internal', puis 'docker compose restart caddy'."
 echo
 echo -e "🩺 Diagnostic/réparer :  ./scripts/doctor.sh          # vérifie l'installation"
 echo -e "   ./scripts/doctor.sh --fix # diagnostique ET répare automatiquement"
+echo -e "🚀 Mise à jour :       ./scripts/update.sh          # vérifie + MAJ auto"
+echo -e "   ./scripts/update.sh --check  # vérifie seulement"
 echo -e "📸 Avant une mission :  ./scripts/snapshot.sh <nom>"
 echo -e "♻️  Restaurer :         ./scripts/restore.sh <nom>"
 echo -e "📊 État rapide :        ./scripts/status.sh"

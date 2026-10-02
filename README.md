@@ -195,6 +195,38 @@ Chaque couche a été pensée pour qu'un agent qui dérape ne puisse pas casser 
 
 ---
 
+## 🔄 Mises à jour
+
+VMREMOTEAGENT dispose d'un système de mise à jour automatisé :
+
+```bash
+# Vérifier si une mise à jour est disponible (sans rien modifier)
+sudo ./scripts/update.sh --check
+
+# Mettre à jour (demande confirmation)
+sudo ./scripts/update.sh
+
+# Mettre à jour sans confirmation
+sudo ./scripts/update.sh --yes
+
+# Utiliser le channel beta
+sudo ./scripts/update.sh --channel beta
+```
+
+Ce que fait `update.sh` :
+1. Il compare la version installée avec la dernière version publiée sur GitHub.
+2. Il affiche les notes de version (extrait du `CHANGELOG.md`).
+3. Il crée automatiquement un **snapshot de précaution** (`pre-update-...`).
+4. Il télécharge le nouvel installateur et valide sa syntaxe bash.
+5. Il applique la mise à jour (les volumes de données, clés et comptes CloudCLI sont conservés).
+6. Il exécute un **healthcheck** de 30 secondes après la mise à jour.
+7. Si le service ne démarre pas, il fait un **rollback automatique** vers le snapshot de précaution.
+
+Trois channels sont disponibles : `stable` (défaut), `beta`, `dev`.
+Vous pouvez aussi simplement relancer la one-liner d'installation : elle détectera la version existante et vous proposera la mise à jour.
+
+---
+
 ## 💾 Sauvegardes & restauration
 
 Les scripts dans `scripts/` gèrent les sauvegardes automatiques et manuelles. Voir [`BACKUPS.md`](./BACKUPS.md) pour la documentation complète.
@@ -240,6 +272,7 @@ VMREMOTEAGENT/
     ├── auto-snapshot.sh           # Cron quotidien
     ├── factory-reset.sh           # Reset complet
     ├── doctor.sh                  # Diagnostic & auto-réparation
+    ├── update.sh                  # Mise à jour automatique + rollback
     └── status.sh                  # Diagnostic rapide
 ```
 
@@ -253,6 +286,8 @@ Toutes les commandes ci-dessous sont à lancer depuis le dossier d'installation 
 # État et logs
 ./scripts/doctor.sh                           # diagnostic + réparation
 ./scripts/doctor.sh --fix                     # diagnostic + réparation auto
+./scripts/update.sh                           # mise à jour automatique
+./scripts/update.sh --check                   # vérifie si une MAJ est dispo
 ./scripts/status.sh                           # tableau de bord + backups
 docker compose ps                       # conteneurs Up/Stopped
 docker compose logs -f cloudcli         # logs agents en direct
