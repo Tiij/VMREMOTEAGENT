@@ -1,16 +1,31 @@
 # ============================================================
-# Caddyfile — reverse proxy HTTPS
-#   /       → CloudCLI  :3001   (UI multi-agents)
-#   /ide/   → code-server :8080 (VS Code web)
-# ============================================================
-# Si tu as un domaine (ex: agents.mondomaine.tld), remplace
-# ":80, :443" par ton domaine → certificat Let's Encrypt auto.
+# Caddyfile — Dashboard Apple-style à la racine + code-server
+#   :443 /           → Dashboard statique (Apple-style)
+#   :443 /ide/       → code-server :8080  (VS Code web)
+#   :3001            → CloudCLI :3001     (agents Claude Code / Codex)
+#
+# CloudCLI (React+Express) étant capricieux sur un sous-chemin,
+# on le sert sur un port HTTPS dédié (même hôte, même certificat,
+# pas d'avertissement navigateur en plus).
 # ============================================================
 
-:80, :443 {
+# ---------- HTTP → HTTPS ----------
+http://:80, http://:8080 {
+    redir https://{host}{uri} permanent
+}
+http://:3000 {
+    redir https://{host}:3001{uri} permanent
+}
+
+# ---------- Port 443 : Dashboard + code-server ----------
+https://:443 {
     request_body { max_size 500MB }
 
-    # ---------- code-server (VS Code web) sur /ide/ ----------
+    handle /* {
+        root * /srv/dashboard
+        file_server
+    }
+
     handle_path /ide/* {
         rewrite /ide/* /{uri_slice[2:]}
         reverse_proxy cloudcli:8080 {
@@ -24,16 +39,28 @@
         }
     }
 
-    # ---------- CloudCLI à la racine ----------
-    handle /* {
-        reverse_proxy cloudcli:3001 {
-            header_up Host {host}
-            header_up X-Real-IP {remote_host}
-            header_up X-Forwarded-Proto {scheme}
-            header_up Upgrade {>Upgrade}
-            header_up Connection {>Connection}
-            transport http { response_header_timeout 0 }
-        }
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    tls internal
+    flush_interval -1
+}
+
+# ---------- Port 3001 HTTPS : CloudCLI (agents) ----------
+https://:3001 {
+    request_body { max_size 500MB }
+
+    reverse_proxy cloudcli:3001 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up Upgrade {>Upgrade}
+        header_up Connection {>Connection}
+        transport http { response_header_timeout 0 }
     }
 
     header {

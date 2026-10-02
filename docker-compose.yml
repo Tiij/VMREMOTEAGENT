@@ -1,14 +1,4 @@
-# ============================================================
-# Stack : CloudCLI (frontend multi-agents Claude Code + Codex)
-#         + code-server (VS Code web)  → tous deux sur le même
-#         workspace, tous deux pointés sur Ollama Cloud.
-#
-# Accès (via Caddy HTTPS) :
-#   https://<ip>/         → CloudCLI  (UI multi-agents)
-#   https://<ip>/ide/     → code-server (VS Code dans le navigateur)
-# ============================================================
 services:
-
   cloudcli:
     build: ./cloudcli
     image: multi-agents-cloudcli:latest
@@ -25,11 +15,10 @@ services:
       - codeserver-data:/home/agent/.local/share/code-server
       - codeserver-config:/home/agent/.config/code-server
       - projects:/home/agent/workspace
-    shm_size: "2g"            # Chromium headless (browser-use)
+    shm_size: "2g"
     networks: [agent-net]
     expose: ["3001", "8080"]
 
-  # ---------- Caddy : reverse proxy HTTPS -------------------------
   caddy:
     image: caddy:2-alpine
     container_name: caddy
@@ -37,8 +26,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "3001:3001"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./dashboard:/srv/dashboard:ro
       - caddy-data:/data
       - caddy-config:/config
     networks: [agent-net]

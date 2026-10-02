@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>VMREMOTEAGENT</title>
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%2300f5d4'/><stop offset='1' stop-color='%2300bbf9'/></linearGradient></defs><rect rx='14' ry='14' width='64' height='64' fill='url(%23g)'/><text x='32' y='42' font-size='34' font-family='-apple-system,Helvetica' text-anchor='middle' fill='white' font-weight='700'>🤖</text></svg>">
+<style>
+:root{
+  --card-bg: rgba(255,255,255,.22);
+  --card-bg-hover: rgba(255,255,255,.32);
+  --card-border: rgba(255,255,255,.35);
+  --text: #fff;
+  --text-dim: rgba(255,255,255,.75);
+  --radius: 22px;
+  --shadow: 0 20px 60px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;
+  color:var(--text);
+  min-height:100vh;
+  overflow-x:hidden;
+  background:
+    radial-gradient(1200px 800px at 20% 10%, #ff9a8b 0%, transparent 60%),
+    radial-gradient(1200px 800px at 80% 20%, #ff6ec4 0%, transparent 60%),
+    radial-gradient(1400px 1000px at 50% 100%, #7873f5 0%, transparent 60%),
+    linear-gradient(180deg,#0f2027 0%, #203a43 50%, #2c5364 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing:antialiased;
+}
+body::before{
+  content:"";
+  position:fixed;inset:0;
+  background:
+    radial-gradient(ellipse at top, rgba(255,255,255,.12), transparent 50%),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><circle cx='1' cy='1' r='.5' fill='white' fill-opacity='.03'/></svg>");
+  pointer-events:none;
+  z-index:0;
+}
+.wrap{
+  position:relative;z-index:1;
+  max-width:1100px;
+  margin:0 auto;
+  padding:56px 28px 80px;
+}
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:44px;
+}
+.brand{display:flex;align-items:center;gap:14px}
+.brand .logo{
+  width:44px;height:44px;border-radius:12px;
+  background:linear-gradient(135deg,#00f5d4,#00bbf9);
+  display:grid;place-items:center;font-size:24px;
+  box-shadow:0 8px 20px rgba(0,187,249,.35);
+}
+.brand h1{font-size:22px;font-weight:700;letter-spacing:-.02em}
+.brand small{display:block;color:var(--text-dim);font-weight:500;font-size:12px;margin-top:2px}
+.clock{
+  font-feature-settings:"tnum";
+  font-size:15px;font-weight:600;color:var(--text-dim);
+  background:var(--card-bg);border:1px solid var(--card-border);
+  padding:8px 14px;border-radius:999px;backdrop-filter:blur(20px) saturate(160%);
+  -webkit-backdrop-filter:blur(20px) saturate(160%);
+}
+.hero{
+  text-align:center;margin-bottom:44px;
+}
+.hero h2{
+  font-size:clamp(34px,5vw,52px);
+  font-weight:700;letter-spacing:-.03em;
+  line-height:1.05;
+  text-shadow:0 2px 20px rgba(0,0,0,.2);
+}
+.hero p{
+  margin-top:12px;color:var(--text-dim);
+  font-size:17px;max-width:620px;margin-left:auto;margin-right:auto;
+}
+.grid{
+  display:grid;gap:22px;
+  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+}
+.card{
+  display:flex;flex-direction:column;
+  padding:24px;border-radius:var(--radius);
+  background:var(--card-bg);border:1px solid var(--card-border);
+  backdrop-filter:blur(24px) saturate(180%);
+  -webkit-backdrop-filter:blur(24px) saturate(180%);
+  box-shadow:var(--shadow);
+  text-decoration:none;color:inherit;
+  transition:transform .18s cubic-bezier(.2,.8,.2,1),background .18s,box-shadow .18s;
+  position:relative;overflow:hidden;
+  min-height:170px;
+}
+.card:hover{
+  background:var(--card-bg-hover);
+  transform:translateY(-4px);
+  box-shadow:0 28px 70px rgba(0,0,0,.45);
+}
+.card:active{transform:translateY(-1px)}
+.card .icon{
+  width:58px;height:58px;border-radius:16px;
+  display:grid;place-items:center;font-size:30px;
+  margin-bottom:16px;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.2), 0 6px 16px rgba(0,0,0,.2);
+}
+.card h3{font-size:19px;font-weight:600;letter-spacing:-.01em}
+.card p{margin-top:6px;color:var(--text-dim);font-size:14px;line-height:1.45}
+.card .meta{
+  margin-top:auto;padding-top:18px;display:flex;align-items:center;gap:8px;
+  font-size:13px;color:var(--text-dim);font-weight:500;
+}
+.dot{width:8px;height:8px;border-radius:50%;background:#30d158;box-shadow:0 0 12px #30d158}
+.dot.orange{background:#ff9f0a;box-shadow:0 0 12px #ff9f0a}
+.dot.red{background:#ff453a;box-shadow:0 0 12px #ff453a}
+.arrow{margin-left:auto;font-size:18px;opacity:.7;transition:transform .18s}
+.card:hover .arrow{transform:translateX(4px);opacity:1}
+
+/* Color variants for icons */
+.i-blue  {background:linear-gradient(135deg,#0a84ff,#5ac8fa)}
+.i-purple{background:linear-gradient(135deg,#bf5af2,#5e5ce6)}
+.i-green {background:linear-gradient(135deg,#30d158,#34c759)}
+.i-orange{background:linear-gradient(135deg,#ff9f0a,#ff375f)}
+.i-teal  {background:linear-gradient(135deg,#00c7be,#64d2ff)}
+.i-gray  {background:linear-gradient(135deg,#636366,#8e8e93)}
+.i-pink  {background:linear-gradient(135deg,#ff375f,#ff2d55)}
+.i-indigo{background:linear-gradient(135deg,#5856d6,#af52de)}
+
+footer{
+  margin-top:56px;text-align:center;color:var(--text-dim);font-size:13px;
+}
+footer span{opacity:.7}
+
+@media (max-width:520px){
+  .wrap{padding:32px 18px 60px}
+  .hero h2{font-size:32px}
+  .topbar{margin-bottom:28px}
+  .brand h1{font-size:18px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">🤖</div>
+      <div>
+        <h1 id="host">VMREMOTEAGENT</h1>
+        <small>Multi-agents • Claude Code • Codex • code-server</small>
+      </div>
+    </div>
+    <div class="clock" id="clock">--:--</div>
+  </div>
+
+  <section class="hero">
+    <h2>Bienvenue.</h2>
+    <p>Votre plateforme d'agents IA est en ligne. Choisissez un service pour commencer.</p>
+  </section>
+
+  <main class="grid" id="grid">
+    <a class="card" href="https://AGENT_HOST" target="_self" rel="noopener">
+      <div class="icon i-blue">🧠</div>
+      <h3>Agents CloudCLI</h3>
+      <p>Pilotez Claude Code et Codex depuis l'interface web et mobile. Projets, chat, fichiers, Git, terminal, MCP.</p>
+      <div class="meta"><span class="dot"></span> En ligne<span class="arrow">→</span></div>
+    </a>
+
+    <a class="card" href="/ide/" target="_self" rel="noopener">
+      <div class="icon i-purple">💻</div>
+      <h3>Éditeur IDE</h3>
+      <p>VS Code directement dans le navigateur, sur le même workspace que vos agents. Extensions, terminal, debug.</p>
+      <div class="meta"><span class="dot"></span> code-server<span class="arrow">→</span></div>
+    </a>
+
+    <a class="card" href="https://ollama.com/settings/keys" target="_blank" rel="noopener">
+      <div class="icon i-teal">🔑</div>
+      <h3>Clé Ollama Cloud</h3>
+      <p>Gérez votre clé API, surveillez votre consommation et découvrez de nouveaux modèles sur ollama.com.</p>
+      <div class="meta"><span class="dot orange"></span> Site externe<span class="arrow">↗</span></div>
+    </a>
+
+    <a class="card" href="#" id="snap" onclick="return takeSnap(event)">
+      <div class="icon i-green">💾</div>
+      <h3>Sauvegarder</h3>
+      <p>Créez un snapshot instantané de toute la stack (projets, sessions, config) avant une mission risquée.</p>
+      <div class="meta"><span class="dot orange" id="snapDot"></span> 1 clic<span class="arrow">→</span></div>
+    </a>
+
+    <a class="card" href="#" id="status" onclick="return showStatus(event)">
+      <div class="icon i-indigo">📊</div>
+      <h3>État</h3>
+      <p>Vérifiez que tous les conteneurs tournent et affichez la liste des snapshots existants.</p>
+      <div class="meta"><span class="dot"></span> Diagnostic<span class="arrow">→</span></div>
+    </a>
+
+    <a class="card" href="#" id="docs">
+      <div class="icon i-gray">📘</div>
+      <h3>Documentation</h3>
+      <p>Guide d'utilisation, commandes utiles, dépannage — ouvrez le README du projet.</p>
+      <div class="meta"><span class="dot orange"></span> Bientôt<span class="arrow">→</span></div>
+    </a>
+  </main>
+
+  <footer>
+    <span id="foot">VMREMOTEAGENT</span> · Propulsé par CloudCLI + code-server + Caddy · backend Ollama Cloud
+  </footer>
+</div>
+
+<script>
+// ---------- Host / port auto (ne casse pas si domaine spécifique) ----------
+const host = window.location.hostname;
+const proto = window.location.protocol;
+const agentPort = '3001';
+const agentUrl = `${proto}//${host}:${agentPort}/`;
+document.querySelectorAll('a[href="https://AGENT_HOST"]').forEach(a => a.href = agentUrl);
+document.getElementById('host').textContent = host;
+document.getElementById('foot').textContent = host;
+
+// ---------- Horloge ----------
+function tick(){
+  const d=new Date();
+  const h=String(d.getHours()).padStart(2,'0');
+  const m=String(d.getMinutes()).padStart(2,'0');
+  const s=String(d.getSeconds()).padStart(2,'0');
+  document.getElementById('clock').textContent=`${h}:${m}:${s}`;
+}
+tick();setInterval(tick,1000);
+
+// ---------- Snapshot (simple appel à un endpoint ; pour l'instant on
+// ouvre un prompt rappelant la commande à lancer, car Caddy ne
+// relaie pas encore d'API de gestion sans authentification). ----------
+function takeSnap(e){
+  e.preventDefault();
+  alert("📸 Pour créer un snapshot manuel, lancez dans le terminal de la VM :\n\n  cd /opt/multi-agents && ./scripts/snapshot.sh <nom-du-snapshot>\n\nVous pouvez ensuite restaurer à tout moment avec :\n\n  ./scripts/restore.sh <nom-du-snapshot>\n\n(Un bouton de snapshot en un clic sera disponible dans une prochaine version, quand l'API d'admin sera sécurisée.)");
+  return false;
+}
+function showStatus(e){
+  e.preventDefault();
+  alert("📊 Pour voir l'état détaillé de la stack et des sauvegardes :\n\n  cd /opt/multi-agents && ./scripts/status.sh\n\nLes conteneurs CloudCLI et Caddy doivent être en état 'Up'.");
+  return false;
+}
+</script>
+</body>
+</html>
