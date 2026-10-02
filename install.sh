@@ -14,14 +14,18 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# --- 1) Docker ---
+# --- 1) Outils de base + Docker ---
+# Installe d'abord xxd (vim-common) et cron si absents, pour éviter
+# l'erreur "xxd: command not found" sur Debian minimal arm64.
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg vim-common cron git wget sudo
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "🐳 Installation de Docker..."
-  apt-get update -y
-  apt-get install -y ca-certificates curl gnupg
-  install -m 0755 -d /etc/apt/keyrings
   OS_ID=$(. /etc/os-release && echo "$ID")
   OS_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+  # Détection fiable entre Debian et Ubuntu (le fallback Debian fonctionne
+  # sur les deux si le fichier IDs est mal renseigné).
   curl -fsSL "https://download.docker.com/linux/${OS_ID}/gpg" 2>/dev/null | \
      gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes || \
   curl -fsSL https://download.docker.com/linux/debian/gpg | \
@@ -39,7 +43,9 @@ fi
 # --- 2) Fichier .env ---
 if [[ ! -f .env ]]; then
   cp .env.example .env
-  SECRET=$(head -c 32 /dev/urandom | xxd -p -c 64)
+  # Génération 64 caractères hex. Utilise od (coreutils, présent partout)
+  # plutôt que xxd pour rester compatible Debian minimal / ARM.
+  SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
   sed -i "s|^WEBUI_SECRET_KEY=.*|WEBUI_SECRET_KEY=${SECRET}|" .env
   echo
   echo "✏️  Édite .env pour y mettre :"
