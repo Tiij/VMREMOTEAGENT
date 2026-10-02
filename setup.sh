@@ -159,6 +159,39 @@ msgbox(){
   fi
 }
 
+# ---------- Helper : lire depuis le terminal même quand le script est pipé (curl|bash) ----------
+# Lorsqu'on lance `curl … | bash`, stdin est le script lui-même. Il faut lire les réponses
+# utilisateur depuis /dev/tty pour ne pas consommer le source du script.
+USER_INPUT_FD=""
+_open_user_input(){
+  if [ -n "$USER_INPUT_FD" ]; then return; fi
+  if [ -t 0 ]; then
+    # stdin est déjà le terminal : on lit depuis stdin
+    USER_INPUT_FD=0
+  elif [ -r /dev/tty ] && [ -w /dev/tty ] && [ -c /dev/tty ]; then
+    # On a un TTY de contrôle : ouvrir un fd dédié
+    exec 7</dev/tty 2>/dev/null && USER_INPUT_FD=7 || USER_INPUT_FD=0
+  else
+    # Pas de tty (CI, cron, nohup) : forcer non-interactif
+    USER_INPUT_FD=0
+    NONINTERACTIVE=1
+  fi
+}
+prompt_read(){
+  # Lit une ligne depuis l'entrée utilisateur. Usage : prompt_read VARNAME
+  local var="$1"
+  _open_user_input
+  IFS= read -r "$var" <&$USER_INPUT_FD
+}
+prompt_read_silent(){
+  # Même chose mais sans echo (pour les mots de passe)
+  local var="$1"
+  _open_user_input
+  stty -echo 2>/dev/null <&$USER_INPUT_FD || true
+  IFS= read -r "$var" <&$USER_INPUT_FD
+  stty echo 2>/dev/null <&$USER_INPUT_FD || true
+}
+
 # yesno <titre> <question> [defaut 0=yes / 1=no] → return 0 si Oui
 yesno(){
   local title="$1" msg="$2" default="${3:-0}"
@@ -176,7 +209,7 @@ yesno(){
     [ "$default" = "1" ] && deflabel="[o/N]"
     echo -n "  $deflabel "
     local R
-    IFS= read -r R
+    prompt_read R
     case "$R" in n|N|no|non) return 1 ;; *) return 0 ;; esac
   fi
 }
@@ -196,7 +229,7 @@ inputbox(){
     echo -e "${BOLD}$title${NC}"
     echo -e "$msg" | fold -s -w 72 | sed 's/^/  /'
     echo -n "  [défaut: $default] : "
-    IFS= read -r res
+    prompt_read res
     [ -z "$res" ] && res="$default"
   fi
   echo "$res"
@@ -216,9 +249,7 @@ passwordbox(){
     echo -e "${BOLD}$title${NC}"
     echo -e "$msg" | fold -s -w 72 | sed 's/^/  /'
     echo -n "  > "
-    stty -echo 2>/dev/null || true
-    IFS= read -r res
-    stty echo 2>/dev/null || true
+    prompt_read_silent res
     echo ""
   fi
   echo "$res"
@@ -243,7 +274,7 @@ menu(){
       items+=("$1"); shift 2; i=$((i+1))
     done
     echo -n "  Choix (1-${#items[@]}, défaut=1) : "
-    local R; IFS= read -r R
+    local R; prompt_read R
     if [ -z "$R" ] || [ "$R" -lt 1 ] 2>/dev/null || [ "$R" -gt "${#items[@]}" ] 2>/dev/null; then
       R=1
     fi
@@ -558,9 +589,15 @@ done
 if [ "$VERIFY_ISSUES" -gt 0 ]; then
   echo ""
   warn "$VERIFY_ISSUES problème(s) critique(s) détecté(s)."
-  if [ "${NONINTERACTIVE:-0}" != "1" ] && [ -t 0 ]; then
-    read -p "Voulez-vous continuer malgré tout ? [o/N] " -n 1 -r R; echo
-    case "$R" in o|O|y|Y) warn "Continuation forcée..." ;; *) die "Annulé. Corrigez les problèmes et relancez." ;; esac
+  if [ "${NONINTERACTIVE:-0}" != "1" ]; then
+    _open_user_input
+    if [ -n "$USER_INPUT_FD" ] && [ "$NONINTERACTIVE" != "1" ]; then
+      echo -n "Voulez-vous continuer malgré tout ? [o/N] "
+      prompt_read R
+      case "$R" in o|O|y|Y) warn "Continuation forcée..." ;; *) die "Annulé. Corrigez les problèmes et relancez." ;; esac
+    else
+      die "Problèmes critiques détectés et pas d'entrée interactive disponible. Corrigez ou relancez avec NONINTERACTIVE=1."
+    fi
   fi
 fi
 
@@ -909,7 +946,9 @@ echo ""
 
 # Si l'installation est déjà OK et à jour en mode auto, proposer le menu
 if { [ "$ACTION" = "repair" ] && [ "$ISSUES" -eq 0 ] && [ "$WARNINGS" -eq 0 ] && [ "$INSTALLED_VERSION" = "$INSTALLER_VERSION" ]; } || [ "$ACTION" = "update" ]; then
-  if [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ]; then
+  if [ "$NONINTERACTIVE" != "1" ]; then
+    _open_user_input
+    if [ -n "$USER_INPUT_FD" ] && [ "$NONINTERACTIVE" != "1" ]; then
     echo -e "${YEL}Que voulez-vous faire ?${NC}"
     echo "  [1] Vérifier et redémarrer la stack (réparation légère)     — par défaut"
     echo "  [2] Mettre à jour / réécrire les fichiers de configuration"
@@ -918,7 +957,7 @@ if { [ "$ACTION" = "repair" ] && [ "$ISSUES" -eq 0 ] && [ "$WARNINGS" -eq 0 ] &&
     echo "  [5] Afficher l'état (status.sh) et quitter"
     echo "  [6] Quitter sans rien faire"
     echo -n "  Choix [1-6, défaut=1] : "
-    read -r CHOICE
+    prompt_read CHOICE
     case "${CHOICE:-1}" in
       2) ACTION="repair-files" ;;
       3) ACTION="rebuild" ;;
@@ -928,7 +967,8 @@ if { [ "$ACTION" = "repair" ] && [ "$ISSUES" -eq 0 ] && [ "$WARNINGS" -eq 0 ] &&
       *) ACTION="light-restart" ;;
     esac
     echo ""
-  fi
+    fi  # close prompt-input available
+  fi    # close NONINTERACTIVE guard
 fi
 
 # Pour reinstall, avertissement
@@ -938,10 +978,13 @@ if [ "$ACTION" = "reinstall" ]; then
   echo "  mais les volumes Docker (projets, sessions, config CloudCLI)"
   echo "  seront conservés. Un snapshot de pré-réinstallation sera pris"
   echo "  automatiquement dans $INSTALL_DIR/backups/."
-  if [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ]; then
-    echo -n "  Confirmer par 'OUI' : "
-    read -r C
-    [ "$C" != "OUI" ] && { echo "Annulé."; exit 0; }
+  if [ "$NONINTERACTIVE" != "1" ]; then
+    _open_user_input
+    if [ -n "$USER_INPUT_FD" ] && [ "$NONINTERACTIVE" != "1" ]; then
+      echo -n "  Confirmer par 'OUI' : "
+      prompt_read C
+      [ "$C" != "OUI" ] && { echo "Annulé."; exit 0; }
+    fi
   fi
 fi
 
