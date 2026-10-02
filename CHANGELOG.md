@@ -119,6 +119,56 @@ sudo ./scripts/update.sh --channel beta
 
 ---
 
+## [1.4.2] — 2026-10-02
+
+### Corrigé
+- **Blocage apparent après "Assistant d'intégration..." en mode
+  `curl | sudo bash`** : quand l'utilisateur lançait l'installateur via
+  un pipe ET fournissait déjà `OLLAMA_API_KEY` et `HOSTNAME_PUBLIQUE`,
+  le wizard essayait quand même de poser des questions (adresse,
+  dossier, récap). Les prompts texte s'affichaient sur stdout (bufferisé
+  en mode pipe) et `read </dev/tty` attendait une saisie invisible — le
+  script paraissait bloqué à l'étape "Assistant d'intégration..." alors
+  qu'il attendait une touche Entrée que l'utilisateur ne voyait pas.
+  → **Auto-skip du wizard** si stdin n'est pas un TTY ET que
+  `OLLAMA_API_KEY` + `HOSTNAME_PUBLIQUE` sont déjà fournis. Le script
+  enchaîne directement l'installation sans aucune invite.
+- Détection robuste du TTY de contrôle (`/dev/tty` ou stderr) pour
+  afficher les messages même en mode pipé.
+
+---
+
+## [1.4.1] — 2026-10-02
+
+### Corrigé
+- **Bug critique `curl | bash`** : les invites interactives (`yesno`,
+  `inputbox`, `passwordbox`, `menu`) lisaient depuis stdin au lieu de
+  `/dev/tty`. Quand l'installateur était lancé via
+  `curl -fsSL URL | sudo bash`, stdin contenait le source du script
+  lui-même : les `read` consommèrent donc le code au lieu d'attendre
+  une saisie utilisateur, provoquant l'erreur
+  `syntax error: operand expected (error token is ""$DETECTED_ACTION"")`
+  à la ligne 250 puis la sortie prématurée du script.
+  → Ajout d'un helper `prompt_read` / `prompt_read_silent` qui ouvre
+  `/dev/tty` quand stdin n'est pas un terminal, et remplacement de tous
+  les `read` interactifs du wizard par ces helpers. En l'absence de TTY
+  (CI, cron), `NONINTERACTIVE=1` est forcé automatiquement.
+- **`fi` manquant dans le bloc NO_BUILD/healthcheck** : en mode
+  `NO_BUILD=1`, le script tombait dans la boucle de healthcheck et
+  `set -e` le terminait avant d'écrire le state file et l'écran final
+  de succès.
+- **Fonction `bad()` absente au top-level** (n'existait que dans le
+  scope des scripts embarqués).
+- **Heredocs manquants** `scripts/update.sh` et `VERSION` dans
+  l'installateur embarqué (l'updater et le fichier de version
+  n'étaient pas écrits à l'install).
+- **`software-properties-common`** rendu optionnel sur Debian
+  trixie/testing où le paquet n'existe pas.
+- **Vérification root déplacée avant la bannière** pour que le
+  message "lancez avec sudo" s'affiche même si `/opt` n'existe pas.
+
+---
+
 ## [1.4.0] — 2026-10-02
 
 ### Ajouté

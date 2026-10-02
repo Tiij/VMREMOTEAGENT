@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ==================== Version de cette release ====================
-INSTALLER_VERSION="1.4.0"
+INSTALLER_VERSION="1.4.2"
 STATE_FILE=".vmremoteagent.state"
 META_FILE="MANIFEST.txt"
 HEALTH_TIMEOUT=45
@@ -112,6 +112,30 @@ cd "$INSTALL_DIR"; :> "$LOG_FILE"
 # =====================================================================
 # 🎨 TUI : détection de whiptail + installation si absent
 # =====================================================================
+# En mode curl|sudo bash, stdin est un pipe et stdout est un TTY. Pour
+# être sûr que les prompts texte soient vus par l'utilisateur, on force
+# tous les messages interactifs à passer par /dev/tty (stderr hérite du
+# TTY si sudo l'a préservé, sinon on ouvre explicitement /dev/tty).
+if [ -z "${INTERACTIVE_OUT:-}" ]; then
+  if [ -t 2 ]; then
+    INTERACTIVE_OUT=2
+  elif [ -c /dev/tty ] && [ -w /dev/tty ]; then
+    exec 8>/dev/tty 2>/dev/null && INTERACTIVE_OUT=8 || INTERACTIVE_OUT=2
+  else
+    INTERACTIVE_OUT=2
+  fi
+fi
+# Auto-détection : si l'utilisateur a fourni toutes les infos requises
+# (clé API + host) via les variables d'environnement ET que stdin n'est
+# pas un TTY (curl | bash), on saute le wizard pour ne pas rester bloqué
+# sur un read invisible.
+if [ "${NONINTERACTIVE:-0}" != "1" ] && [ ! -t 0 ] \
+   && [ -n "${OLLAMA_API_KEY:-}" ] && [ -n "${HOSTNAME_PUBLIQUE:-}" ]; then
+  echo "(curl|bash détecté, toutes les variables fournies → wizard désactivé)" >&$INTERACTIVE_OUT
+  NONINTERACTIVE=1
+fi
+export NONINTERACTIVE INTERACTIVE_OUT
+
 USE_TUI=0
 if [ "$NOTUI" != "1" ] && [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ] && [ -t 1 ]; then
   if command -v whiptail >/dev/null 2>&1; then
