@@ -15,8 +15,18 @@
 # =================================================================
 set -euo pipefail
 
+# ==================== Version de cette release ====================
+INSTALLER_VERSION="1.1.0"
+STATE_FILE=".vmremoteagent.state"
+META_FILE="MANIFEST.txt"
+HEALTH_TIMEOUT=30
+
 INSTALL_DIR="${INSTALL_DIR:-/opt/multi-agents}"
 LOG_FILE="$INSTALL_DIR/install.log"
+# Mode d'action : auto / install / repair / update / reinstall / status
+FORCE_ACTION="${FORCE_ACTION:-auto}"
+# Ne pas demander de confirmation en mode non-interactif
+NONINTERACTIVE="${NONINTERACTIVE:-0}"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YEL='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 banner(){ echo -e "${CYAN}
 ╔══════════════════════════════════════════════════════════════╗
@@ -124,11 +134,247 @@ else
 fi
 docker info >/dev/null 2>&1 || die "Docker ne répond pas."
 
+# ==============================================================
+# 🔍 DIAGNOSTIC INTELLIGENT : détecte install / repair / update / reinstall
+# ==============================================================
+step "Diagnostic de l'installation existante..."
+
+STATE_RAW="none"; INSTALLED_VERSION=""; INSTALL_DATE=""; ISSUES=0; WARNINGS=0; DETAILS=()
+has(){ [ -e "$1" ]; }
+count_container_up(){ docker ps --filter "name=$1" --format '{{.Names}}' 2>/dev/null | wc -l; }
+
+# 1. Dossier install ?
+if [ -d "$INSTALL_DIR" ]; then
+  # 2. Fichier d'état ?
+  if [ -f "$INSTALL_DIR/$STATE_FILE" ]; then
+    STATE_RAW=$(grep -E '^state='    "$INSTALL_DIR/$STATE_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo "unknown")
+    INSTALLED_VERSION=$(grep -E '^version=' "$INSTALL_DIR/$STATE_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo "?")
+    INSTALL_DATE=$(grep -E '^install_date=' "$INSTALL_DIR/$STATE_FILE" 2>/dev/null | cut -d= -f2- || echo "")
+  fi
+  # Si le dossier existe mais sans STATE_FILE → install cassée/incomplète
+  [ "$STATE_RAW" = "none" ] && STATE_RAW="incomplete"
+
+  # 3. Vérifier les fichiers critiques
+  for f in docker-compose.yml Caddyfile .env dashboard/index.html cloudcli/Dockerfile cloudcli/entrypoint.sh cloudcli/supervisord.conf scripts/status.sh; do
+    if [ ! -f "$INSTALL_DIR/$f" ]; then
+      DETAILS+=("fichier manquant: $f"); ISSUES=$((ISSUES+1))
+    fi
+  done
+
+  # 4. Docker compose valide ?
+  if has "$INSTALL_DIR/docker-compose.yml"; then
+    if (cd "$INSTALL_DIR" && docker compose config --quiet) >/dev/null 2>&1; then
+      : # ok
+    else
+      DETAILS+=("docker-compose.yml invalide"); ISSUES=$((ISSUES+1))
+    fi
+  fi
+
+  # 5. Images Docker construites ?
+  if docker image inspect multi-agents-cloudcli:latest >/dev/null 2>&1; then
+    :
+  else
+    DETAILS+=("image multi-agents-cloudcli:latest absente"); ISSUES=$((ISSUES+1))
+  fi
+
+  # 6. Conteneurs Up ?
+  if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+    UP_CLOUD=$(count_container_up '^cloudcli$')
+    UP_CADDY=$(count_container_up '^caddy$')
+    if [ "$UP_CLOUD" -eq 0 ] || [ "$UP_CADDY" -eq 0 ]; then
+      DETAILS+=("conteneurs arrêtés (cloudcli=$UP_CLOUD, caddy=$UP_CADDY)"); WARNINGS=$((WARNINGS+1))
+    fi
+  fi
+
+  # 7. Cron ?
+  if [ -L /etc/cron.daily/cloudcli-snapshot ]; then
+    :
+  else
+    DETAILS+=("lien cron absent"); WARNINGS=$((WARNINGS+1))
+  fi
+
+  # 8. Clé API dans .env ?
+  if [ -f "$INSTALL_DIR/.env" ]; then
+    if grep -qE '^OLLAMA_API_KEY=(sk-ollama|ollama).+' "$INSTALL_DIR/.env"; then
+      :
+    elif grep -qE '^OLLAMA_API_KEY=sk-ollama-votre-cle' "$INSTALL_DIR/.env"; then
+      DETAILS+=("OLLAMA_API_KEY toujours sur la valeur exemple"); WARNINGS=$((WARNINGS+1))
+    elif ! grep -qE '^OLLAMA_API_KEY=.+' "$INSTALL_DIR/.env"; then
+      DETAILS+=("OLLAMA_API_KEY absente du .env"); ISSUES=$((ISSUES+1))
+    fi
+  fi
+
+  # 9. Ports 80/443/3001 libres ? (si pas de conteneurs déjà en écoute)
+  for PORT in 80 443 3001; do
+    if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q ":$PORT"; then
+      # Vérifier si c'est Caddy qui écoute — si oui c'est normal
+      LISTENER_PID=$(ss -ltnHp "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -n1 || echo "")
+      if [ -n "$LISTENER_PID" ]; then
+        LISTENER_NAME=$(ps -p "$LISTENER_PID" -o comm= 2>/dev/null || echo "")
+        case "$LISTENER_NAME" in
+          docker-proxy|caddy|containerd-shim) : ;;
+          *) DETAILS+=("port $PORT occupé par $LISTENER_NAME (PID $LISTENER_PID)"); WARNINGS=$((WARNINGS+1)) ;;
+        esac
+      fi
+    fi
+  done
+fi
+
+# 10. Décision de l'action
+case "$STATE_RAW" in
+  none)
+    ACTION="install"
+    ACTION_LABEL="🆕 NOUVELLE INSTALLATION"
+    ACTION_DETAIL="Aucune installation détectée dans $INSTALL_DIR."
+    ;;
+  incomplete)
+    ACTION="repair"
+    ACTION_LABEL="🔧 RÉPARATION"
+    ACTION_DETAIL="Le dossier $INSTALL_DIR existe mais n'a pas de marqueur d'état (installation interrompue ou ancienne version)."
+    ;;
+  ok|healthy)
+    if [ "$ISSUES" -eq 0 ] && [ "$WARNINGS" -eq 0 ]; then
+      if [ "$INSTALLED_VERSION" = "$INSTALLER_VERSION" ]; then
+        ACTION="repair"
+        ACTION_LABEL="✅ INSTALLATION OK — Vérification / réparation"
+        ACTION_DETAIL="Version $INSTALLED_VERSION déjà installée et saine. Relance = vérification + redémarrage si besoin."
+      else
+        ACTION="update"
+        ACTION_LABEL="⬆️  MISE À JOUR"
+        ACTION_DETAIL="Version installée : $INSTALLED_VERSION → version de l'installateur : $INSTALLER_VERSION."
+      fi
+    elif [ "$ISSUES" -gt 0 ]; then
+      ACTION="repair"
+      ACTION_LABEL="🔧 RÉPARATION"
+      ACTION_DETAIL="Installation détectée (v$INSTALLED_VERSION) mais $ISSUES problème(s) critique(s) détecté(s)."
+    else
+      ACTION="repair"
+      ACTION_LABEL="🔧 VÉRIFICATION & CORRECTION"
+      ACTION_DETAIL="Installation détectée (v$INSTALLED_VERSION) avec $WARNINGS avertissement(s)."
+    fi
+    ;;
+  failed|error|interrupted)
+    ACTION="repair"
+    ACTION_LABEL="🔧 RÉPARATION (échec détecté)"
+    ACTION_DETAIL="La dernière installation avait échoué (état: $STATE_RAW)."
+    ;;
+  *)
+    ACTION="repair"
+    ACTION_LABEL="🔧 RÉPARATION (état inconnu)"
+    ACTION_DETAIL="État précédent: '$STATE_RAW', v$INSTALLED_VERSION."
+    ;;
+esac
+
+# Force action ?
+if [ "$FORCE_ACTION" != "auto" ]; then
+  ACTION="$FORCE_ACTION"
+  ACTION_LABEL="FORCÉ: $FORCE_ACTION"
+  ACTION_DETAIL="Action forcée par la variable FORCE_ACTION=$FORCE_ACTION."
+fi
+
+# Afficher le diagnostic
+echo ""
+echo -e "${CYAN}┌─────────────────────────────────────────────────────┐${NC}"
+echo -e "${CYAN}│${NC}              $ACTION_LABEL"
+echo -e "${CYAN}└─────────────────────────────────────────────────────┘${NC}"
+echo -e "  ${CYAN}Dossier cible :${NC} $INSTALL_DIR"
+echo -e "  ${CYAN}Action :${NC}       $ACTION_DETAIL"
+if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "?" ]; then
+  echo -e "  ${CYAN}Version installée :${NC} $INSTALLED_VERSION  ${CYAN}(installateur :${NC} $INSTALLER_VERSION${CYAN})${NC}"
+fi
+if [ -n "$INSTALL_DATE" ]; then
+  echo -e "  ${CYAN}Installée le :${NC}    $INSTALL_DATE"
+fi
+if [ "$ISSUES" -gt 0 ] || [ "$WARNINGS" -gt 0 ]; then
+  echo ""
+  declare -A SEEN=()
+  for d in "${DETAILS[@]}"; do
+    [ -n "${SEEN[$d]:-}" ] && continue
+    SEEN[$d]=1
+    case "$d" in
+      *manquant*|*invalide*|*absente*|*absente\ du\ .env*)
+        echo -e "  ${RED}✘${NC} $d" ;;
+      *)
+        echo -e "  ${YEL}⚠${NC} $d" ;;
+    esac
+  done
+fi
+echo ""
+
+# Si l'installation est déjà OK et à jour en mode auto, proposer le menu
+if { [ "$ACTION" = "repair" ] && [ "$ISSUES" -eq 0 ] && [ "$WARNINGS" -eq 0 ] && [ "$INSTALLED_VERSION" = "$INSTALLER_VERSION" ]; } || [ "$ACTION" = "update" ]; then
+  if [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ]; then
+    echo -e "${YEL}Que voulez-vous faire ?${NC}"
+    echo "  [1] Vérifier et redémarrer la stack (réparation légère)     — par défaut"
+    echo "  [2] Mettre à jour / réécrire les fichiers de configuration"
+    echo "  [3] Build complet de l'image et redémarrage (upgrade)"
+    echo "  [4] Réinstallation complète (puis restaure les volumes)"
+    echo "  [5] Afficher l'état (status.sh) et quitter"
+    echo "  [6] Quitter sans rien faire"
+    echo -n "  Choix [1-6, défaut=1] : "
+    read -r CHOICE
+    case "${CHOICE:-1}" in
+      2) ACTION="repair-files" ;;
+      3) ACTION="rebuild" ;;
+      4) ACTION="reinstall" ;;
+      5) bash "$INSTALL_DIR/scripts/status.sh"; exit 0 ;;
+      6) echo "Annulé."; exit 0 ;;
+      *) ACTION="light-restart" ;;
+    esac
+    echo ""
+  fi
+fi
+
+# Pour reinstall, avertissement
+if [ "$ACTION" = "reinstall" ]; then
+  echo -e "${RED}⚠ Vous avez choisi RÉINSTALLATION COMPLÈTE.${NC}"
+  echo "  Les conteneurs seront arrêtés, les images seront supprimées,"
+  echo "  mais les volumes Docker (projets, sessions, config CloudCLI)"
+  echo "  seront conservés. Un snapshot de pré-réinstallation sera pris"
+  echo "  automatiquement dans $INSTALL_DIR/backups/."
+  if [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ]; then
+    echo -n "  Confirmer par 'OUI' : "
+    read -r C
+    [ "$C" != "OUI" ] && { echo "Annulé."; exit 0; }
+  fi
+fi
+
+# Snapshot de précaution si l'installation existe déjà
+if [ "$STATE_RAW" != "none" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ] && [ -f "$INSTALL_DIR/scripts/snapshot.sh" ]; then
+  step "Snapshot de précaution avant modification..."
+  (cd "$INSTALL_DIR" && bash scripts/snapshot.sh "pre-${ACTION}-$(date +%Y%m%d-%H%M%S)" >/dev/null 2>&1 && ok "Snapshot de sauvegarde créé dans backups/") || warn "Impossible de créer un snapshot (continuons)."
+fi
+
 # ---------- Écriture des fichiers ----------
+# En mode repair/light-restart on saute la réécriture des fichiers de config
+SKIP_WRITE=0
+case "$ACTION" in light-restart) SKIP_WRITE=1 ;; esac
+
+if [ "$SKIP_WRITE" -eq 0 ]; then
 step "Écriture de la configuration dans $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"/{cloudcli,scripts,backups,dashboard}
 
-SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
+# Conserver l'ancien secret si .env existe déjà (évite d'invalider les comptes CloudCLI)
+EXISTING_SECRET=""; EXISTING_OLLAMA=""; EXISTING_WEBUI=""
+if [ -f "$INSTALL_DIR/.env" ]; then
+  EXISTING_SECRET=$(grep -E '^WEBUI_SECRET_KEY=' "$INSTALL_DIR/.env" | cut -d= -f2-)
+  EXISTING_OLLAMA=$(grep -E '^OLLAMA_API_KEY=' "$INSTALL_DIR/.env" | cut -d= -f2-)
+  EXISTING_WEBUI=$(grep -E '^WEBUI_URL=' "$INSTALL_DIR/.env" | cut -d= -f2-)
+fi
+SECRET="${EXISTING_SECRET:-$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)}"
+# Ne pas écraser la clé Ollama existante si elle est valide et qu'on n'a pas passé la nouvelle
+if [ -n "$EXISTING_OLLAMA" ] && [[ "$EXISTING_OLLAMA" == sk-* ]] && [ "${OLLAMA_API_KEY:-}" = "$EXISTING_OLLAMA" ]; then
+  : # la variable passée prévaut
+elif [ -n "$EXISTING_OLLAMA" ] && [[ "$EXISTING_OLLAMA" == sk-* ]] && [ -z "${OLLAMA_API_KEY_ENV:-}" ]; then
+  OLLAMA_API_KEY="$EXISTING_OLLAMA"
+  ok "Clé Ollama existante conservée"
+fi
+# Conserver WEBUI_URL si l'utilisateur n'a pas passé de nouveau HOSTNAME_PUBLIQUE
+if [ -n "$EXISTING_WEBUI" ] && [ "${HOSTNAME_PUBLIQUE:-}" = "localhost" ] && [ "$ACTION" != "install" ]; then
+  HOSTNAME_PUBLIQUE="${EXISTING_WEBUI#https://}"
+  HOSTNAME_PUBLIQUE="${HOSTNAME_PUBLIQUE%/}"
+fi
+
 cat > "$INSTALL_DIR/.env" <<EOF
 # Généré par setup.sh le $(date -Iseconds)
 OLLAMA_API_KEY=${OLLAMA_API_KEY}
@@ -267,7 +513,7 @@ footer{margin-top:56px;text-align:center;color:var(--text-dim);font-size:13px}
 <a class="card" href="/ide/" rel="noopener"><div class="icon i-purple">💻</div><h3>Éditeur IDE</h3><p>VS Code dans le navigateur, sur le même workspace que vos agents. Extensions, terminal, debug.</p><div class="meta"><span class="dot"></span> code-server<span class="arrow">→</span></div></a>
 <a class="card" href="https://ollama.com/settings/keys" target="_blank" rel="noopener"><div class="icon i-teal">🔑</div><h3>Clé Ollama Cloud</h3><p>Gérez votre clé API, surveillez la conso et découvrez de nouveaux modèles sur ollama.com.</p><div class="meta"><span class="dot orange"></span> Site externe<span class="arrow">↗</span></div></a>
 <a class="card" href="#" onclick="alert('📸 Snapshot manuel :\n\n  cd /opt/multi-agents && ./scripts/snapshot.sh <nom>\n\nRestauration : ./scripts/restore.sh <nom>');return false;"><div class="icon i-green">💾</div><h3>Sauvegarder</h3><p>Créez un snapshot instantané de toute la stack avant une mission risquée.</p><div class="meta"><span class="dot orange"></span> Terminal<span class="arrow">→</span></div></a>
-<a class="card" href="#" onclick="alert('📊 État de la stack :\n\n  cd /opt/multi-agents && ./scripts/status.sh');return false;"><div class="icon i-indigo">📊</div><h3>État</h3><p>Vérifiez que tous les conteneurs tournent et listez les snapshots existants.</p><div class="meta"><span class="dot"></span> Diagnostic<span class="arrow">→</span></div></a>
+<a class="card" href="#" onclick="alert('🩺 Diagnostic et réparation automatique :\n\n  cd /opt/multi-agents && ./scripts/doctor.sh\n\nPour réparer automatiquement :\n\n  ./scripts/doctor.sh --fix\n\n(Aperçu rapide : ./scripts/status.sh).');return false;"><div class="icon i-indigo">📊</div><h3>État / Réparer</h3><p>Diagnostique automatiquement la stack et répare les fichiers, conteneurs ou config cassés.</p><div class="meta"><span class="dot"></span> Doctor · auto-réparation<span class="arrow">→</span></div></a>
 <a class="card" href="https://github.com/Tiij/VMREMOTEAGENT" target="_blank" rel="noopener"><div class="icon i-gray">📘</div><h3>Documentation</h3><p>README, guide d'installation, commandes utiles et dépannage sur GitHub.</p><div class="meta"><span class="dot orange"></span> GitHub<span class="arrow">↗</span></div></a>
 </main>
 <footer><span id="foot">VMREMOTEAGENT</span> · CloudCLI + code-server + Caddy · backend Ollama Cloud</footer></div>
@@ -417,23 +663,345 @@ if ls backups/*.tar.gz >/dev/null 2>&1;then N=$(ls -1 backups/*.tar.gz|wc -l);S=
 echo;IP=$(hostname -I 2>/dev/null|awk '{print $1}');echo "🔗 https://${IP:-<IP>}/   •   https://${IP:-<IP>}/ide/   •   https://${IP:-<IP>}:3001/"
 EOS
 
+write_script "$INSTALL_DIR/scripts/doctor.sh" 755 <<'EOS'
+#!/usr/bin/env bash
+# =============================================================
+# VMREMOTEAGENT DOCTOR — Diagnostic & réparation
+# Usage :
+#   cd /opt/multi-agents && ./scripts/doctor.sh            # diagnostic interactif
+#   cd /opt/multi-agents && ./scripts/doctor.sh --fix      # diagnostic + réparation auto
+#   cd /opt/multi-agents && ./scripts/doctor.sh --fix --noninteractive
+# =============================================================
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+G="\033[0;32m"; R="\033[0;31m"; Y="\033[1;33m"; C="\033[0;36m"; NC="\033[0m"
+hdr(){ echo -e "\n${C}═══ $* ═══${NC}"; }
+ok(){  echo -e "  ${G}✔${NC} $*"; }
+warn(){ echo -e "  ${Y}⚠${NC} $*"; }
+bad(){  echo -e "  ${R}✘${NC} $*"; }
+
+FIX=0; NONINT=0
+for a in "$@"; do
+  case "$a" in
+    --fix)             FIX=1 ;;
+    --noninteractive)  NONINT=1 ;;
+    -h|--help)
+      echo "Usage: $0 [--fix] [--noninteractive]"; exit 0 ;;
+  esac
+done
+
+echo -e "${C}
+╔══════════════════════════════════════════╗
+║    🩺  VMREMOTEAGENT  —  Doctor          ║
+║    Diagnostic & réparation automatique  ║
+╚══════════════════════════════════════════╝${NC}"
+
+PROBLEMS=0; CAN_FIX=0
+
+# ---------- 1. Fichiers ----------
+hdr "1. Fichiers de configuration"
+REQUIRED_FILES=(
+  docker-compose.yml Caddyfile .env
+  dashboard/index.html
+  cloudcli/Dockerfile cloudcli/entrypoint.sh cloudcli/supervisord.conf
+  scripts/status.sh scripts/snapshot.sh scripts/doctor.sh
+)
+for f in "${REQUIRED_FILES[@]}"; do
+  if [ -f "$f" ]; then ok "$f"
+  else bad "manquant: $f"; PROBLEMS=$((PROBLEMS+1)); CAN_FIX=$((CAN_FIX+1)); fi
+done
+if [ -f .vmremoteagent.state ]; then
+  V=$(grep -E '^version=' .vmremoteagent.state 2>/dev/null | cut -d= -f2 || echo "?")
+  S=$(grep -E '^state='   .vmremoteagent.state 2>/dev/null | cut -d= -f2 || echo "?")
+  ok "marqueur d'état présent ($S, v$V)"
+else
+  warn "marqueur d'état .vmremoteagent.state absent (installation incomplète ou ancienne)"
+  CAN_FIX=$((CAN_FIX+1))
+fi
+
+# ---------- 2. Docker ----------
+hdr "2. Docker"
+if command -v docker >/dev/null 2>&1; then
+  ok "docker $(docker --version 2>/dev/null | sed 's/Docker version //;s/,.*//')"
+else
+  bad "docker n'est pas installé"; PROBLEMS=$((PROBLEMS+1)); CAN_FIX=$((CAN_FIX+1))
+fi
+if docker info >/dev/null 2>&1; then
+  ok "démon Docker répond"
+else
+  bad "démon Docker arrêté ou injoignable"; PROBLEMS=$((PROBLEMS+1)); CAN_FIX=$((CAN_FIX+1))
+fi
+if docker compose version >/dev/null 2>&1; then
+  ok "docker compose $(docker compose version --short 2>/dev/null)"
+else
+  bad "plugin docker compose absent"; PROBLEMS=$((PROBLEMS+1)); CAN_FIX=$((CAN_FIX+1))
+fi
+
+# ---------- 3. Compose validity ----------
+hdr "3. Configuration docker-compose"
+if [ -f docker-compose.yml ]; then
+  if docker compose config --quiet 2>/dev/null; then ok "compose valide"
+  else bad "docker-compose.yml invalide"; PROBLEMS=$((PROBLEMS+1)); CAN_FIX=$((CAN_FIX+1)); fi
+fi
+
+# ---------- 4. Image ----------
+hdr "4. Image Docker de la stack"
+if docker image inspect multi-agents-cloudcli:latest >/dev/null 2>&1; then
+  CREATED=$(docker image inspect multi-agents-cloudcli:latest -f '{{.Created}}' 2>/dev/null | cut -d. -f1)
+  ok "multi-agents-cloudcli:latest (créée $CREATED)"
+else
+  warn "image multi-agents-cloudcli:latest absente (pas encore buildée ou à reconstruire)"
+  CAN_FIX=$((CAN_FIX+1))
+fi
+
+# ---------- 5. Conteneurs ----------
+hdr "5. Conteneurs"
+for N in cloudcli caddy; do
+  if docker ps --filter "name=^${N}$" --format '{{.Status}}' 2>/dev/null | grep -q Up; then
+    ST=$(docker ps --filter "name=^${N}$" --format '{{.Status}}' 2>/dev/null)
+    ok "$N : $ST"
+  elif docker ps -a --filter "name=^${N}$" --format '{{.Names}}' 2>/dev/null | grep -q "$N"; then
+    EXIT=$(docker ps -a --filter "name=^${N}$" --format '{{.Status}}' 2>/dev/null)
+    bad "$N arrêté ($EXIT)"; PROBLEMS=$((PROBLEMS+1)); CAN_FIX=$((CAN_FIX+1))
+  else
+    warn "$N non créé (la stack n'a jamais été démarrée)"; CAN_FIX=$((CAN_FIX+1))
+  fi
+done
+
+# ---------- 6. HTTP endpoints ----------
+hdr "6. Connectivité (HTTPS local)"
+if curl -kfsS --max-time 5 https://127.0.0.1/ -o /dev/null 2>/dev/null; then
+  ok "dashboard https://127.0.0.1/ répond"
+else
+  bad "dashboard ne répond pas sur le port 443"; PROBLEMS=$((PROBLEMS+1))
+fi
+if curl -kfsS --max-time 5 https://127.0.0.1:3001/ -o /dev/null 2>/dev/null; then
+  ok "CloudCLI https://127.0.0.1:3001/ répond"
+else
+  warn "CloudCLI sur :3001 ne répond pas encore (normal au premier démarrage, attendre 1-2 min)"
+fi
+if curl -kfsS --max-time 5 https://127.0.0.1/ide/ -o /dev/null 2>/dev/null; then
+  ok "/ide/ (code-server) répond"
+else
+  warn "/ide/ ne répond pas encore (normal si cloudcli est encore en boot)"
+fi
+
+# ---------- 7. Cron & snapshots ----------
+hdr "7. Sauvegardes"
+if [ -L /etc/cron.daily/cloudcli-snapshot ]; then
+  ok "lien cron installé ($(readlink -f /etc/cron.daily/cloudcli-snapshot))"
+else
+  warn "lien cron /etc/cron.daily/cloudcli-snapshot absent"; CAN_FIX=$((CAN_FIX+1))
+fi
+if ls backups/*.tar.gz >/dev/null 2>&1; then
+  N=$(ls -1 backups/*.tar.gz 2>/dev/null | wc -l)
+  S=$(du -sh backups 2>/dev/null | cut -f1)
+  ok "$N snapshots ($S)"
+  ls -lht backups/*.tar.gz 2>/dev/null | head -n3 | awk '{printf "     %-6s %s\n",$5,$6" "$7" "$8,$9}'
+else
+  warn "aucun snapshot — lancez ./scripts/snapshot.sh premier-test"
+fi
+
+# ---------- 8. .env ----------
+hdr "8. Configuration .env"
+if [ -f .env ]; then
+  if grep -qE '^OLLAMA_API_KEY=sk-' .env; then ok "clé Ollama configurée"
+  else bad "OLLAMA_API_KEY invalide dans .env"; PROBLEMS=$((PROBLEMS+1)); fi
+  if grep -qE '^WEBUI_SECRET_KEY=.{16,}' .env; then ok "secret webui présent"
+  else warn "WEBUI_SECRET_KEY absent ou trop court"; fi
+  if grep -qE '^WEBUI_URL=https?://.+' .env; then ok "WEBUI_URL renseignée"
+  else warn "WEBUI_URL manquant"; fi
+else
+  bad ".env absent"; PROBLEMS=$((PROBLEMS+1)); CAN_FIX=$((CAN_FIX+1))
+fi
+
+# ---------- 9. Ports host ----------
+hdr "9. Ports hôtes (80/443/3001)"
+for PORT in 80 443 3001; do
+  if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q ":$PORT"; then
+    LISTENER_PID=$(ss -ltnHp "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -n1 || echo "")
+    LISTENER_NAME="?"
+    [ -n "$LISTENER_PID" ] && LISTENER_NAME=$(ps -p "$LISTENER_PID" -o comm= 2>/dev/null || echo "?")
+    case "$LISTENER_NAME" in
+      docker-proxy|caddy|containerd-shim*|caddy)
+        ok "port $PORT écouté par $LISTENER_NAME (Caddy/container docker : OK)" ;;
+      "")
+        ok "port $PORT en écoute" ;;
+      *)
+        bad "port $PORT occupé par $LISTENER_NAME (PID $LISTENER_PID) — conflit potentiel"
+        PROBLEMS=$((PROBLEMS+1)) ;;
+    esac
+  else
+    bad "port $PORT pas en écoute (Caddy n'est pas démarré?)"; PROBLEMS=$((PROBLEMS+1))
+  fi
+done
+
+# ---------- Bilan ----------
+echo
+if [ "$PROBLEMS" -eq 0 ]; then
+  echo -e "${G}✅ Tout semble opérationnel.${NC}"
+  echo "state=healthy" > .vmremoteagent.state
+  grep -qE '^version=' .vmremoteagent.state 2>/dev/null || echo "version=?" >> .vmremoteagent.state
+  exit 0
+fi
+
+echo -e "${Y}${PROBLEMS} problème(s) détecté(s), ${CAN_FIX} peuvent être corrigés automatiquement.${NC}"
+
+if [ "$FIX" -eq 0 ] && [ "$NONINT" -eq 0 ] && [ -t 0 ]; then
+  echo ""
+  read -p "Voulez-vous que le docteur répare automatiquement ? [O/n] " -n 1 -r R; echo
+  case "$R" in n|N) echo "Annulé. Relancez avec ./scripts/doctor.sh --fix pour réparer."; exit 0;; esac
+  FIX=1
+fi
+
+if [ "$FIX" -eq 1 ]; then
+  hdr "🔧 Réparation"
+
+  # Si Docker est absent, on ne peut pas aller loin
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    bad "Docker indisponible. Relancez l'installateur :"
+    echo "  curl -fsSL https://raw.githubusercontent.com/Tiij/VMREMOTEAGENT/main/setup.sh | sudo bash"
+    exit 2
+  fi
+
+  # Fichiers ou image manquants → relancer setup.sh en mode repair
+  NEED_REINSTALL=0
+  for f in docker-compose.yml Caddyfile dashboard/index.html cloudcli/Dockerfile cloudcli/entrypoint.sh cloudcli/supervisord.conf; do
+    [ ! -f "$f" ] && NEED_REINSTALL=1
+  done
+  if ! docker image inspect multi-agents-cloudcli:latest >/dev/null 2>&1; then
+    NEED_REINSTALL=1
+  fi
+
+  if [ "$NEED_REINSTALL" -eq 1 ] && [ -x ./setup.sh ]; then
+    warn "Fichiers ou image Docker manquants → relance de setup.sh en mode repair"
+    FORCE_ACTION=repair NONINTERACTIVE=1 bash ./setup.sh
+  elif [ "$NEED_REINSTALL" -eq 1 ] && [ ! -x ./setup.sh ]; then
+    bad "setup.sh n'est pas présent dans $(pwd)."
+    echo "  Relancez l'installation complète :"
+    echo "  curl -fsSL https://raw.githubusercontent.com/Tiij/VMREMOTEAGENT/main/setup.sh | sudo bash"
+    exit 2
+  else
+    # Conteneurs arrêtés ou instables → redémarrage simple
+    warn "Redémarrage de la stack (up -d --remove-orphans)..."
+    docker compose up -d --remove-orphans || warn "docker compose up a retourné une erreur (voir logs)"
+    ok "Commande de relance envoyée. Les services démarrent en arrière-plan."
+  fi
+
+  # Recréer le lien cron s'il manque
+  if [ ! -L /etc/cron.daily/cloudcli-snapshot ] && [ -x scripts/auto-snapshot.sh ]; then
+    ln -sf "$(pwd)/scripts/auto-snapshot.sh" /etc/cron.daily/cloudcli-snapshot
+    ok "lien cron recréé"
+  fi
+
+  # Snapshot de l'état
+  if curl -kfsS --max-time 3 https://127.0.0.1/ -o /dev/null 2>/dev/null; then
+    echo "state=healthy" > .vmremoteagent.state
+  else
+    echo "state=starting" > .vmremoteagent.state
+  fi
+  if ! grep -qE '^version=' .vmremoteagent.state 2>/dev/null; then
+    echo "version=?" >> .vmremoteagent.state
+  fi
+  echo ""
+  echo -e "${G}✅ Fin de la réparation.${NC}"
+  echo "   Attendez 30-60 secondes le temps que CloudCLI et code-server démarrent,"
+  echo "   puis relancez : ./scripts/doctor.sh"
+  echo "   Pour les logs en direct : docker compose logs -f cloudcli"
+fi
+
+EOS
+
 ok "Fichiers de config écrits"
+fi # SKIP_WRITE
 
 # ---------- Cron backup ----------
 step "Configuration du cron de sauvegarde quotidien..."
 ln -sf "$INSTALL_DIR/scripts/auto-snapshot.sh" /etc/cron.daily/cloudcli-snapshot
 chmod +x "$INSTALL_DIR/scripts/"*.sh
-systemctl enable --now cron 2>/dev/null || true
+CRON_SVC="cron"
+command -v crond >/dev/null 2>&1 && CRON_SVC="crond"
+systemctl enable --now "$CRON_SVC" 2>/dev/null || true
 mkdir -p /var/log && touch /var/log/cloudcli-snapshot.log && chmod 644 /var/log/cloudcli-snapshot.log
 ok "Cron quotidien installé → /etc/cron.daily/cloudcli-snapshot"
 
-# ---------- Build & start ----------
+# ---------- Build & start (selon l'action décidée par le diagnostic) ----------
+BUILD_ACTION="--build"
+UP_ACTION="up -d"
+case "$ACTION" in
+  light-restart)
+    BUILD_ACTION=""
+    step "Redémarrage léger (sans rebuild)..."
+    ;;
+  repair-files)
+    step "Réécriture des fichiers + redémarrage..."
+    ;;
+  rebuild|reinstall)
+    step "Build complet de l'image et redémarrage..."
+    if [ "$ACTION" = "rebuild" ]; then
+      (cd "$INSTALL_DIR" && docker compose down 2>/dev/null || true)
+      docker image rm -f multi-agents-cloudcli:latest >/dev/null 2>&1 || true
+    fi
+    ;;
+  install|repair|update|*)
+    step "Build des images Docker et démarrage (5-15 min au premier run)..."
+    ;;
+esac
+
 if [ "${NO_BUILD:-}" = "1" ]; then
   warn "NO_BUILD=1, démarrage ignoré. Lancez : cd $INSTALL_DIR && docker compose up -d --build"
+  FINAL_STATE="setup-ok-nobuild"
 else
-  step "Build des images Docker et démarrage (5-15 min au premier run)..."
-  if docker compose up -d --build; then ok "Stack démarrée";else warn "Build échoué. Ré-essayez : cd $INSTALL_DIR && docker compose up -d --build";fi
+  cd "$INSTALL_DIR"
+  if docker compose $UP_ACTION $BUILD_ACTION 2>&1 | tee -a "$LOG_FILE"; then
+    ok "Stack démarrée"
+    FINAL_STATE="starting"
+  else
+    # Marquer l'échec
+    { echo "state=failed"
+      echo "version=$INSTALLER_VERSION"
+      echo "fail_date=$(date -Iseconds)"
+      echo "action=$ACTION"
+    } > "$INSTALL_DIR/$STATE_FILE"
+    die "Build/démarrage échoué. État sauvegardé dans $INSTALL_DIR/$STATE_FILE. Corrigez l'erreur puis relancez le script (il reprendra automatiquement en mode réparation). Log: $LOG_FILE"
+  fi
+
+  # ---------- Healthcheck post-install ----------
+  step "Vérification du service (healthcheck, ${HEALTH_TIMEOUT}s max)..."
+  HEALTH_OK=0
+  for i in $(seq 1 $HEALTH_TIMEOUT); do
+    UP1=$(count_container_up '^cloudcli$')
+    UP2=$(count_container_up '^caddy$')
+    if [ "$UP1" -eq 1 ] && [ "$UP2" -eq 1 ]; then
+      if curl -kfsS --max-time 3 https://127.0.0.1/ -o /dev/null 2>/dev/null; then
+        HEALTH_OK=1; break
+      fi
+    fi
+    sleep 1
+  done
+
+  if [ "$HEALTH_OK" -eq 1 ]; then
+    ok "Healthcheck OK : conteneurs Up + dashboard répond en HTTPS"
+    FINAL_STATE="healthy"
+  else
+    warn "Healthcheck: conteneurs Up mais le dashboard ne répond pas encore (attendez 30-60s supplémentaires, premier lancement de code-server/CloudCLI)."
+    FINAL_STATE="starting"
+  fi
 fi
+
+# ---------- Écrire le fichier d'état ----------
+cat > "$INSTALL_DIR/$STATE_FILE" <<EOF
+# VMREMOTEAGENT state file — ne pas supprimer
+state=$FINAL_STATE
+version=$INSTALLER_VERSION
+install_date=$([ -n "${INSTALL_DATE:-}" ] && echo "$INSTALL_DATE" || date -Iseconds)
+last_action=$ACTION
+last_run=$(date -Iseconds)
+install_dir=$INSTALL_DIR
+host=$HOSTNAME_PUBLIQUE
+EOF
+ok "État sauvegardé ($FINAL_STATE)"
 
 # ---------- Message final ----------
 echo
@@ -450,9 +1018,11 @@ echo -e "   Pour un vrai certificat : pointez un domaine vers l'IP, remplacez"
 echo -e "   les ':443' et ':3001' dans le Caddyfile par votre domaine,"
 echo -e "   supprimez 'tls internal', puis 'docker compose restart caddy'."
 echo
-echo -e "📸 Avant une mission : cd $INSTALL_DIR && ./scripts/snapshot.sh <nom>"
-echo -e "♻️  Restaurer :        ./scripts/restore.sh <nom>"
-echo -e "📊 État :              ./scripts/status.sh"
+echo -e "🩺 Diagnostic/réparer :  ./scripts/doctor.sh          # vérifie l'installation"
+echo -e "   ./scripts/doctor.sh --fix # diagnostique ET répare automatiquement"
+echo -e "📸 Avant une mission :  ./scripts/snapshot.sh <nom>"
+echo -e "♻️  Restaurer :         ./scripts/restore.sh <nom>"
+echo -e "📊 État rapide :        ./scripts/status.sh"
 echo
 echo -e "${CYAN}Log :${NC} $LOG_FILE"
 echo -e "${CYAN}Dossier :${NC} $INSTALL_DIR"

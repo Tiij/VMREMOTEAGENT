@@ -120,6 +120,8 @@ curl -fsSL https://raw.githubusercontent.com/Tiij/VMREMOTEAGENT/main/setup.sh \
 
 La variable `HOSTNAME_PUBLIQUE` est utilisée pour afficher les URLs finales. Vous pouvez omettre `OLLAMA_API_KEY` et `HOSTNAME_PUBLIQUE` : le script vous les demandera interactivement.
 
+> 💡 **L'installateur est intelligent et idempotent** : si vous le relancez, il détecte automatiquement l'état de l'installation (neuve, cassée, à mettre à jour, déjà saine), affiche un diagnostic en 9 points, propose un menu d'actions adapté, prend un snapshot de précaution avant toute modification, préserve votre clé API et votre secret CloudCLI, puis fait un healthcheck HTTPS en fin de course. Si quelque chose casse à n'importe quel moment, un simple `./scripts/doctor.sh --fix` diagnostique et répare automatiquement.
+
 Vous pouvez aussi cloner le repo d'abord (si vous voulez inspecter avant) :
 
 ```bash
@@ -200,7 +202,9 @@ Les scripts dans `scripts/` gèrent les sauvegardes automatiques et manuelles. V
 ```bash
 ./scripts/snapshot.sh avant-refactoring     # sauvegarde manuelle
 ./scripts/restore.sh avant-refactoring      # restaure
-./scripts/status.sh                         # état de la stack + backups
+./scripts/doctor.sh                         # diagnostic + réparation automatique
+./scripts/doctor.sh --fix                     # diagnostic ET réparation
+./scripts/status.sh                         # état rapide de la stack + backups
 ./scripts/factory-reset.sh                  # reset complet
 ```
 
@@ -235,7 +239,8 @@ VMREMOTEAGENT/
     ├── restore.sh                 # Restauration
     ├── auto-snapshot.sh           # Cron quotidien
     ├── factory-reset.sh           # Reset complet
-    └── status.sh                  # Diagnostic
+    ├── doctor.sh                  # Diagnostic & auto-réparation
+    └── status.sh                  # Diagnostic rapide
 ```
 
 ---
@@ -246,7 +251,9 @@ Toutes les commandes ci-dessous sont à lancer depuis le dossier d'installation 
 
 ```bash
 # État et logs
-./scripts/status.sh                     # tableau de bord + backups
+./scripts/doctor.sh                           # diagnostic + réparation
+./scripts/doctor.sh --fix                     # diagnostic + réparation auto
+./scripts/status.sh                           # tableau de bord + backups
 docker compose ps                       # conteneurs Up/Stopped
 docker compose logs -f cloudcli         # logs agents en direct
 docker compose logs -f caddy            # logs reverse proxy
