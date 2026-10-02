@@ -29,7 +29,37 @@ die(){ echo -e "${RED}✘${NC}  $*">&2; exit 1; }
 ok(){ echo -e "${GREEN}✔${NC} $*"; }
 
 banner
-[ "$(id -u)" -ne 0 ] && die "Lance ce script en ROOT (sudo ou root direct)."
+
+# ---------- Vérification root ----------
+if [ "$(id -u)" -ne 0 ]; then
+  echo ""
+  echo -e "${RED}✘${NC}  Ce script doit être lancé en ROOT."
+  echo ""
+  echo -e "   ${YEL}Si vous avez fait:${NC}"
+  echo -e "     $ ${0##*/}"
+  echo ""
+  echo -e "   ${GREEN}Relancez avec:${NC}"
+  echo -e "     $ sudo ${0##*/}"
+  echo ""
+  echo -e "   ${YEL}Si vous utilisez la commande curl | bash:${NC}"
+  echo ""
+  echo -e "     ❌ curl -fsSL URL | bash"
+  echo ""
+  echo -e "   ${GREEN}Ajoutez sudo devant bash:${NC}"
+  echo ""
+  echo -e "     ✅ curl -fsSL URL | ${GREEN}sudo${NC} bash"
+  echo ""
+  echo -e "   ${YEL}Ou bien (sans curl pipe):${NC}"
+  echo ""
+  echo -e "     $ su -"
+  echo -e "     # curl -fsSL URL | bash"
+  echo ""
+  echo -e "   Astuce: placez vos variables d'environnement APRÈS sudo:"
+  echo -e "     curl -fsSL URL | sudo OLLAMA_API_KEY=sk-... HOSTNAME_PUBLIQUE=1.2.3.4 bash"
+  echo ""
+  exit 1
+fi
+
 mkdir -p "$INSTALL_DIR"; cd "$INSTALL_DIR"; :> "$LOG_FILE"
 
 # ---------- Détection système ----------

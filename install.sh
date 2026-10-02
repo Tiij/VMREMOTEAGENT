@@ -7,7 +7,19 @@
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
-  echo "⚠️  Lance en root :  sudo ./install.sh" >&2
+  echo "" >&2
+  echo "✘  Ce script doit être lancé en ROOT." >&2
+  echo "" >&2
+  echo "   Vous avez tapé :" >&2
+  echo "     $ ./install.sh" >&2
+  echo "" >&2
+  echo "   Relancez avec sudo :" >&2
+  echo "     $ sudo ./install.sh" >&2
+  echo "" >&2
+  echo "   Ou bien passez root d'abord :" >&2
+  echo "     $ su -" >&2
+  echo "     # cd /chemin/vers/VMREMOTEAGENT && ./install.sh" >&2
+  echo "" >&2
   exit 1
 fi
 
