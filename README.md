@@ -7,9 +7,10 @@
 [CloudCLI](https://github.com/siteboon/claudecodeui) · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [Codex CLI](https://github.com/openai/codex) · [code-server](https://github.com/coder/code-server) · [Caddy](https://caddyserver.com) · [Ollama Cloud](https://ollama.com)
 
 [![License: Propriétaire](https://img.shields.io/badge/License-Propri%C3%A9taire-red.svg)]()
-[![Debian](https://img.shields.io/badge/Debian-12%2F13-red)](https://debian.org)
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%2F24.04-orange)](https://ubuntu.com)
-[![Docker](https://img.shields.io/badge/Docker-Compose-blue)](https://docs.docker.com/compose)
+[![Debian/Ubuntu](https://img.shields.io/badge/Debian%2FUbuntu-12%2F13%2F22.04%2F24.04-red)](https://debian.org)
+[![Fedora/RHEL](https://img.shields.io/badge/Fedora%2FRHEL-40%2F9-blue)](https://fedoraproject.org)
+[![Arch](https://img.shields.io/badge/Arch%2FManjaro-rolling-1793d1)](https://archlinux.org)
+[![Docker auto-install](https://img.shields.io/badge/Docker-auto--install-blue)](https://docs.docker.com/compose)
 [![No GPU](https://img.shields.io/badge/GPU-none-success)](https://ollama.com)
 [![Mobile](https://img.shields.io/badge/Mobile-ready-brightgreen)]()
 
@@ -43,6 +44,11 @@ Les agents **Claude Code** et **Codex CLI** (officiels) sont préinstallés, pr�
 - 💻 **Développement à distance** — Depuis un Chromebook, un iPad, un PC d'emprunt ou un téléphone, retrouvez votre environnement de dev complet : éditeur VS Code, terminal, agents IA, vos projets Git.
 - 🏖️ **Coder en déplacement** — Toutes les fonctionnalités (chat, fichiers, git, terminal) fonctionnent sur mobile. Vous pouvez lancer une build ou un refactoring depuis votre téléphone pendant que vous êtes en déplacement.
 - 🤝 **Collaboration multi-agents** — Claude Code et Codex travaillent sur le même dossier. Lancez Claude pour l'architecture et Codex pour l'implémentation, ou laissez-les dialoguer.
+- 🔍 **Vérification système automatique** — L'installateur contrôle architecture, CPU, RAM, disque, ports, connectivité et distribution avant toute modification ; crée automatiquement un fichier swap de 2 Go si la VM manque de RAM pour éviter les plantages au build.
+- 🎛️ **Interface d'installation interactive (TUI)** — Assistant d'onboarding en mode terminal avec boîtes de dialogue, barre de progression en temps réel, invites masquées pour la clé API, écran de bienvenue et de fin (whiptail, installé automatiquement si absent) ; fonctionne aussi en mode texte brut ou en CI avec `NONINTERACTIVE=1`.
+- 🔒 **Verrou d'instance** — Impossible de lancer deux installations en parallèle ; un plantage ne laisse pas de verrou orphelin.
+- ✅ **Détection fiable du succès/échec** — Écran final avec les URLs si tout va bien, ou avec les consignes de rollback/diagnostic si quelque chose casse ; code de sortie shell adapté.
+- 📦 **Installation multi-distro en une commande** — Reconnaît automatiquement apt (Debian/Ubuntu), dnf (Fedora/RHEL/Rocky), pacman (Arch), apk (Alpine), zypper (openSUSE) et installe Docker via le repo officiel adapté.
 - 🔬 **Bac à sable sécurisé** — Les agents tournent dans un conteneur Docker isolé (pas d'accès au système hôte, pas de socket Docker). Le workspace est un volume Docker dédié.
 - 💾 **Snapshot avant tout** — Une commande sauvegarde tous vos projets, sessions et config ; une autre les restaure. Un cron quotidien tourne automatiquement.
 - 📦 **Reproductible** — Une machine propre + une commande = toute la plateforme. Déployez chez Hetzner, OVH, DigitalOcean, AWS, Scaleway, Vultr, sur un Raspberry Pi 5, ou même en local sur macOS/WSL.
@@ -106,7 +112,7 @@ Les agents **Claude Code** et **Codex CLI** (officiels) sont préinstallés, pr�
 
 ### 1. Prérequis
 
-- Une machine Linux avec **Docker** (le script d'installation l'installe automatiquement si absent) — ou macOS/Windows avec Docker Desktop.
+- Une machine Linux (l'installateur installe automatiquement Docker sur **Debian/Ubuntu, Fedora/RHEL/Rocky/Alma, Arch/Manjaro, Alpine, openSUSE** via le gestionnaire de paquets adapté) — ou macOS/Windows avec Docker Desktop.
 - **2 vCPU / 4 Go RAM minimum** (8 Go recommandés si vous utilisez plusieurs agents en parallèle).
 - Ports **80, 443 et 3001** ouverts si c'est une VM exposée sur Internet.
 - Une **clé API Ollama Cloud** → https://ollama.com/settings/keys
@@ -147,11 +153,12 @@ sudo ./setup.sh
 
 | OS / Distro | Version testée | Notes |
 |---|---|---|
-| ✅ **Debian** | 12 Bookworm, 13 Trixie | Support principal, installateur une commande |
-| ✅ **Ubuntu** | 22.04 LTS, 24.04 LTS | Support principal |
-| ✅ **Raspberry Pi OS** | 12 Bookworm (arm64) | Sur Pi 5 (≥4 Go), fonctionne — démarrage plus long |
-| ✅ **Fedora / RHEL / Rocky / AlmaLinux** | 40 / 9 | Voir section dédiée du tutoriel (dnf) |
-| ✅ **Arch Linux / Manjaro** | rolling | Voir section dédiée (pacman) |
+| ✅ **Debian / Ubuntu / dérivés** | Debian 12/13, Ubuntu 22.04/24.04, Mint, Pop!, Raspbian, Kali, Zorin | Support principal, Docker via apt |
+| ✅ **Raspberry Pi OS** | 12 Bookworm (arm64) | Pi 5 ≥4 Go (swap auto ajouté si RAM juste) |
+| ✅ **Fedora / RHEL / Rocky / Alma** | Fedora 40, RHEL/Rocky/Alma 9, Oracle 9 | Docker via dnf |
+| ✅ **Arch / Manjaro / EndeavourOS** | rolling | Docker via pacman |
+| ✅ **Alpine Linux** | 3.x | Docker via apk (openrc) |
+| ✅ **openSUSE / SLES** | Tumbleweed, Leap 15 | Docker via zypper |
 | ⚙️ **macOS** (local/test) | Sonoma+, puce Intel ou Apple Silicon | Via Docker Desktop, `HOSTNAME_PUBLIQUE=localhost` |
 | ⚙️ **Windows WSL2** | WSL2 + Ubuntu/Debian | Via Docker Desktop ou Docker dans WSL2 |
 | ⚙️ **NixOS** | 24.05 | Docker + `systemd.enable = true` |
