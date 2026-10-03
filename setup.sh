@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ==================== Version de cette release ====================
-INSTALLER_VERSION="1.4.4"
+INSTALLER_VERSION="1.4.5"
 STATE_FILE=".vmremoteagent.state"
 META_FILE="MANIFEST.txt"
 HEALTH_TIMEOUT=45
@@ -2037,20 +2037,21 @@ case "$ACTION" in
     ;;
 esac
 
-# Limiter la concurrence BuildKit pour éviter OOM sur les VMs ARM64 avec peu de RAM.
-# BuildKit parallélise plusieurs couches à la fois et dépense ~2× plus de RAM.
+# Limiter la mémoire utilisée pendant le build Docker.
+# Sur ARM64 / faible RAM, BuildKit parallélise plusieurs couches et
+# consomme plus de RAM : on utilise le builder classique et on limite
+# le parallélisme à 1 pour éviter l'OOM (exit 137).
 export DOCKER_BUILDKIT=1
 export BUILDKIT_PROGRESS=plain
-# Sur ARM64 / faible RAM, on limite max-parallelism à 1
+export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-}"
 ARCH_NOW="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-COMPOSE_BUILD_OPTS=""
 case "$ARCH_NOW" in aarch64|arm64|armv7l)
-  # Détection de la RAM disponible
   _AVAIL_RAM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
   _AVAIL_RAM_MB=$((_AVAIL_RAM_KB / 1024))
   if [ "$_AVAIL_RAM_MB" -lt 2500 ]; then
-    COMPOSE_BUILD_OPTS="--parallel=0"
-    warn "ARM64 détecté avec ${_AVAIL_RAM_MB} Mo de RAM : concurrence BuildKit désactivée pour éviter l'OOM."
+    export DOCKER_BUILDKIT=0
+    export COMPOSE_PARALLEL_LIMIT=1
+    warn "ARM64 détecté avec ${_AVAIL_RAM_MB} Mo de RAM : BuildKit désactivé + parallélisme=1 pour éviter l'OOM."
     warn "Le build peut durer 10-25 minutes (npm installe claude-code, codex et cloudcli séquentiellement)."
     warn "Pour aller plus vite, augmentez la RAM à 4 Go."
   fi
@@ -2062,7 +2063,7 @@ if [ "${NO_BUILD:-}" = "1" ]; then
   FINAL_STATE="setup-ok-nobuild"
 else
   cd "$INSTALL_DIR"
-  if docker compose $UP_ACTION $BUILD_ACTION $COMPOSE_BUILD_OPTS 2>&1 | tee -a "$LOG_FILE"; then
+  if docker compose $UP_ACTION $BUILD_ACTION 2>&1 | tee -a "$LOG_FILE"; then
     ok "Stack démarrée"
     FINAL_STATE="starting"
   else

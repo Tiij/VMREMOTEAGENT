@@ -119,6 +119,23 @@ sudo ./scripts/update.sh --channel beta
 
 ---
 
+## [1.4.5] — 2026-10-03
+
+### Corrigé
+- **Erreur `unknown flag: --parallel`** au lancement de `docker compose up` :
+  `--parallel` n'est un flag que de la sous-commande `docker compose build`,
+  pas de `docker compose up`. Remplacé par les variables d'environnement
+  appropriées pour limiter la concurrence sur les machines ARM64 à faible
+  RAM :
+  - `DOCKER_BUILDKIT=0` (désactive BuildKit, moins consommateur que le
+    builder classique en RAM sur les petits VPS ARM64),
+  - `COMPOSE_PARALLEL_LIMIT=1` (force Compose à ne builder qu'une couche
+    à la fois).
+  Ce correctif s'ajoute à ceux du 1.4.4 (npm séquentiel, heap Node
+  limité, swap 4 Go).
+
+---
+
 ## [1.4.4] — 2026-10-03
 
 ### Corrigé
