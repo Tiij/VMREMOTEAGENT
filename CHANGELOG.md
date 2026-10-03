@@ -119,6 +119,62 @@ sudo ./scripts/update.sh --channel beta
 
 ---
 
+## [1.4.4] — 2026-10-03
+
+### Corrigé
+- **Build Docker qui plante avec `exit code: 137`** (SIGKILL / OOM Out of
+  Memory) à l'étape `npm install -g @anthropic-ai/claude-code
+  @openai/codex @cloudcli-ai/cloudcli` sur les VMs avec peu de RAM
+  (typiquement ARM64 avec 1-2 Go de RAM, sur lesquelles npm
+  consomme 2.5-3 Go de RAM au pic quand il installe les trois paquets
+  en parallèle).
+  - Les trois paquets npm sont maintenant installés **séparément**
+    (trois couches Docker distinctes) au lieu d'une seule commande,
+    divisant le pic mémoire par ~3.
+  - `NODE_OPTIONS="--max-old-space-size=1024"` force Node à se limiter
+    à 1 Go de heap, évitant les explosions mémoire.
+  - `NPM_CONFIG_JOBS=1` + `NPM_CONFIG_MAXSOCKETS=1` désactive le
+    parallélisme npm pour réduire l'empreinte.
+  - Concurrence BuildKit désactivée (`--parallel=0`) sur ARM64 avec
+    moins de 2.5 Go de RAM, pour éviter que plusieurs couches ne
+    soient buildées en parallèle.
+  - Swap automatique augmenté à **4 Go** (au lieu de 2 Go) sur les
+    machines ARM64 ≤ 2.5 Go de RAM.
+- **Chromium retiré de l'image Docker** (sauve ~400 Mo et réduit la
+  conso RAM/pic au build) : il n'est pas utilisé en serveur et peut
+  être réinstallé à la main si besoin.
+- Message d'avertissement clair affiché si la RAM est insuffisante et
+  que le build risque d'échouer, avec la consigne (augmenter à 4 Go).
+
+---
+
+## [1.4.3] — 2026-10-02
+
+### Corrigé
+- **Erreur "bash: line 2013: syntax error: unexpected end of file"** : le
+  script était parfois **tronqué en milieu de téléchargement** quand
+  l'utilisateur lançait `curl … | bash` directement (la connexion TCP
+  se fermait avant la fin, bash exécutait ce qu'il avait reçu et
+  rencontrait un `fi`/`esac` non fermé à la ligne de coupure).
+- **Ajout d'un installateur sûr `install.sh`** qui :
+  1. Télécharge `setup.sh` dans un fichier temporaire (avec `--retry 3`
+     et `--max-time 60`),
+  2. Vérifie la syntaxe bash (`bash -n`) avant de l'exécuter,
+  3. Vérifie la présence du marqueur de fin `_VMRA_EOF_MARKER=1` ajouté
+     à la fin de `setup.sh` pour détecter toute troncature silencieuse.
+- **Marqueur d'intégrité** `_VMRA_EOF_MARKER=1` ajouté en fin de
+  `setup.sh`. Il NE DOIT PAS être supprimé ; si curl tronque le
+  téléchargement, ce marqueur est absent et le script ne s'exécute
+  pas.
+
+### À noter
+- La méthode recommandée est désormais d'utiliser `install.sh` (plus
+  petit, 58 lignes, moins de risque de troncature) plutôt que de piper
+  directement `setup.sh` dans bash. Les deux méthodes restent
+  supportées mais `install.sh` est plus robuste.
+
+---
+
 ## [1.4.2] — 2026-10-02
 
 ### Corrigé

@@ -1,125 +1,58 @@
 #!/usr/bin/env bash
-# =================================================================
-# Installation automatique CloudCLI + Caddy sur Ubuntu/Debian
-# Installe Docker si besoin, crée le .env, build l'image,
-# configure la sauvegarde quotidienne automatique.
-# =================================================================
+# =====================================================================
+#  INSTALLATEUR SÛR — VMREMOTEAGENT
+#  Télécharge setup.sh en ENTIER avant de l'exécuter, évitant les
+#  plantages "syntax error: unexpected end of file" causés par curl
+#  qui tronque le script en milieu de téléchargement quand on pipe
+#  directement (curl | bash).
+#
+#  Usage :
+#    curl -fsSL https://raw.githubusercontent.com/Tiij/VMREMOTEAGENT/main/install.sh -o /tmp/vmra-install.sh
+#    sudo OLLAMA_API_KEY=sk-... HOSTNAME_PUBLIQUE=1.2.3.4 bash /tmp/vmra-install.sh
+#
+#  Ou encore plus simple (one-liner SÛR) :
+#    curl -fsSL https://raw.githubusercontent.com/Tiij/VMREMOTEAGENT/main/install.sh | sudo bash -s -- OLLAMA_API_KEY=sk-... HOSTNAME_PUBLIQUE=1.2.3.4
+# =====================================================================
 set -euo pipefail
 
-if [[ $EUID -ne 0 ]]; then
-  echo "" >&2
-  echo "✘  Ce script doit être lancé en ROOT." >&2
-  echo "" >&2
-  echo "   Vous avez tapé :" >&2
-  echo "     $ ./install.sh" >&2
-  echo "" >&2
-  echo "   Relancez avec sudo :" >&2
-  echo "     $ sudo ./install.sh" >&2
-  echo "" >&2
-  echo "   Ou bien passez root d'abord :" >&2
-  echo "     $ su -" >&2
-  echo "     # cd /chemin/vers/VMREMOTEAGENT && ./install.sh" >&2
-  echo "" >&2
+REPO_URL="${REPO_URL:-https://raw.githubusercontent.com/Tiij/VMREMOTEAGENT/main}"
+SETUP_URL="${SETUP_URL:-$REPO_URL/setup.sh}"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+echo "» Téléchargement de setup.sh depuis $SETUP_URL ..."
+if ! curl -fL --retry 3 --retry-delay 2 --max-time 60 -o "$TMP/setup.sh" "$SETUP_URL"; then
+  echo "✘ Échec du téléchargement (vérifiez votre connexion internet et l'URL)." >&2
   exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-
-# --- 1) Outils de base + Docker ---
-# Installe d'abord xxd (vim-common) et cron si absents, pour éviter
-# l'erreur "xxd: command not found" sur Debian minimal arm64.
-apt-get update -y
-apt-get install -y ca-certificates curl gnupg vim-common cron git wget sudo
-
-if ! command -v docker >/dev/null 2>&1; then
-  echo "🐳 Installation de Docker..."
-  OS_ID=$(. /etc/os-release && echo "$ID")
-  OS_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-  # Détection fiable entre Debian et Ubuntu (le fallback Debian fonctionne
-  # sur les deux si le fichier IDs est mal renseigné).
-  curl -fsSL "https://download.docker.com/linux/${OS_ID}/gpg" 2>/dev/null | \
-     gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes || \
-  curl -fsSL https://download.docker.com/linux/debian/gpg | \
-     gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes
-  chmod a+r /etc/apt/keyrings/docker.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${OS_ID} ${OS_CODENAME} stable" \
-    > /etc/apt/sources.list.d/docker.list
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  systemctl enable --now docker
-else
-  echo "✅ Docker : $(docker --version)"
+echo "» Vérification du script..."
+# 1. Syntaxe bash
+if ! bash -n "$TMP/setup.sh"; then
+  echo "✘ Le script téléchargé contient une erreur de syntaxe (fichier probablement tronqué)." >&2
+  echo "  Le fichier a été conservé dans : $TMP/setup.sh" >&2
+  echo "  Réessayez, ou téléchargez-le manuellement." >&2
+  trap - EXIT
+  exit 1
 fi
 
-# --- 2) Fichier .env ---
-if [[ ! -f .env ]]; then
-  cp .env.example .env
-  # Génération 64 caractères hex. Utilise od (coreutils, présent partout)
-  # plutôt que xxd pour rester compatible Debian minimal / ARM.
-  SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
-  sed -i "s|^WEBUI_SECRET_KEY=.*|WEBUI_SECRET_KEY=${SECRET}|" .env
-  echo
-  echo "✏️  Édite .env pour y mettre :"
-  echo "     OLLAMA_API_KEY=sk-ollama-...  (https://ollama.com/settings/keys)"
-  echo "     WEBUI_URL=https://<IP_PUBLIQUE_DE_LA_VM>"
-  echo
-else
-  echo "✅ .env existe déjà."
+# 2. Marqueur de fin (EOF integrity marker)
+if ! grep -q '^_VMRA_EOF_MARKER=1$' "$TMP/setup.sh"; then
+  echo "✘ Marqueur de fin de script absent — le téléchargement a été tronqué." >&2
+  echo "  Fichier conservé dans : $TMP/setup.sh" >&2
+  trap - EXIT
+  exit 1
 fi
 
-# --- 3) Dossiers & droits des scripts de backup ---
-mkdir -p backups
-chmod +x scripts/*.sh 2>/dev/null || true
+echo "» Lancement de l'installation..."
+# Passer tous les arguments de ce script à setup.sh comme variables d'environnement
+# (supporte VAR=val VAR2=val2 ... ou aucune variable pour le wizard interactif)
+for arg in "$@"; do
+  case "$arg" in
+    *=*) export "$arg" ;;
+    *) echo "⚠ Argument ignoré (pas KEY=VALUE) : $arg" >&2 ;;
+  esac
+done
 
-# --- 4) Sauvegarde automatique quotidienne (cron ou systemd-timer) ---
-echo "📼 Configuration des sauvegardes automatiques quotidiennes..."
-
-# Installer cron si absent
-if ! command -v cron >/dev/null 2>&1 && ! command -v crond >/dev/null 2>&1; then
-  echo "  ↳ installation de cron..."
-  apt-get update -y && apt-get install -y --no-install-recommends cron
-fi
-
-# Lien symbolique dans cron.daily (lancé chaque jour par run-parts,
-# généralement entre 6h et 8h du matin selon la distro)
-ln -sf "$SCRIPT_DIR/scripts/auto-snapshot.sh" /etc/cron.daily/cloudcli-snapshot
-
-# Garantir que le script est exécutable
-chmod +x "$SCRIPT_DIR/scripts/auto-snapshot.sh"
-
-# Démarrer + activer le service cron si on le vient d'installer
-if command -v cron >/dev/null 2>&1; then
-  systemctl enable --now cron 2>/dev/null || true
-fi
-
-# Créer le fichier de log avec droits ouverts pour que cron puisse écrire
-touch /var/log/cloudcli-snapshot.log
-chmod 644 /var/log/cloudcli-snapshot.log
-
-echo "  ✅ Sauvegarde quotidienne installée :"
-echo "     • Script : /etc/cron.daily/cloudcli-snapshot → $SCRIPT_DIR/scripts/auto-snapshot.sh"
-echo "     • Archives : $SCRIPT_DIR/backups/"
-echo "     • Log : /var/log/cloudcli-snapshot.log"
-echo "     • Conservation : 14 snapshots auto (30j pour les manuels)"
-echo "     • Variable SNAPSHOT_KEEP pour changer la rétention si besoin"
-echo
-
-cat <<EOF
-🚪 Ouvre les ports 80 et 443 dans ton firewall / security-group.
-
-Puis :
-    docker compose up -d --build
-
-Au premier lancement, ouvre https://<IP>/ :
-  1. Le certificat est auto-signé (accepte l'avertissement).
-  2. CloudCLI te demande de définir un mot de passe (compte local).
-  3. Tu peux créer plusieurs projets, lancer Claude Code OU Codex
-     dans chacun, et basculer entre eux depuis le navigateur
-     PC comme téléphone.
-  4. https://<IP>/ide/ ouvre VS Code (code-server) sur le même workspace.
-
-📼 Pour tester la sauvegarde immédiatement :
-    ./scripts/snapshot.sh test-premier-snapshot
-    ls -lh backups/
-EOF
+# Exécuter le script complet depuis le fichier temporaire
+bash "$TMP/setup.sh"

@@ -22,10 +22,20 @@
 
 Déployez en **une commande** une plateforme complète d'agents IA sur une VM (ou votre PC), accessible depuis n'importe quel navigateur desktop ou mobile. Aucun GPU nécessaire — tout le calcul est délégué à **Ollama Cloud**.
 
+**Commande recommandée (la plus robuste, vérifie l'intégrité du script avant exécution) :**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Tiij/VMREMOTEAGENT/main/install.sh | sudo bash -s -- OLLAMA_API_KEY=sk-ollama-... HOSTNAME_PUBLIQUE=<ip>
+```
+
+Méthode alternative (pipant directement setup.sh) :
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tiij/VMREMOTEAGENT/main/setup.sh \
   | sudo OLLAMA_API_KEY=sk-ollama-... HOSTNAME_PUBLIQUE=<ip> bash
 ```
+
+> **Astuce** : la première méthode utilise `install.sh` (58 lignes) qui télécharge `setup.sh` en entier, vérifie sa syntaxe et un marqueur de fin avant de l'exécuter — ça élimine les erreurs `syntax error: unexpected end of file` qui arrivent quand curl tronque le téléchargement en milieu de script. Ajoutez `NONINTERACTIVE=1` devant `bash` (ou dans les variables) pour sauter le wizard si vous fournissez déjà `OLLAMA_API_KEY` et `HOSTNAME_PUBLIQUE`.
 
 5 à 15 minutes plus tard, vous obtenez :
 

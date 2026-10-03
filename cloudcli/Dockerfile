@@ -15,11 +15,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=Europe/Paris
 
 # ---- Paquets système ----
+# chromium est omis (non utilisé en serveur, sauve ~400 Mo d'espace disque
+# et réduit drastiquement la RAM consommée pendant le build sur ARM64).
+# Si vous voulez le navigateur headless pour du browser-use, ajoutez-le
+# dans un deuxième temps.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git unzip zip jq sudo htop tmux neovim ripgrep fd-find \
       build-essential python3 python3-pip python3-venv pipx \
       openssh-client gnupg procps xz-utils supervisor tini \
-      chromium fonts-noto-color-emoji \
+      fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Node.js 22 (requis par CloudCLI) ----
@@ -29,7 +33,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && npm install -g npm@latest
 
 # ---- CLIs : Claude Code, Codex, CloudCLI ----
-RUN npm install -g @anthropic-ai/claude-code @openai/codex @cloudcli-ai/cloudcli
+# On installe les paquets UN PAR UN avec une limite de mémoire Node
+# et sans parallélisme pour éviter l'OOM (exit code 137) sur les VMs
+# avec peu de RAM (1-2 Go), typiquement ARM64. Chaque RUN est une
+# couche Docker séparée ce qui permet aussi de bénéficier du cache.
+ENV NODE_OPTIONS="--max-old-space-size=1024" \
+    NPM_CONFIG_FETCH_RETRIES=5 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=10000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=60000 \
+    NPM_CONFIG_JOBS=1 \
+    NPM_CONFIG_MAXSOCKETS=1
+RUN npm install -g @openai/codex
+RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @cloudcli-ai/cloudcli
 
 # ---- code-server (VS Code web) ----
 RUN curl -fsSL https://code-server.dev/install.sh | sh \
@@ -79,7 +95,6 @@ ENV ANTHROPIC_BASE_URL=https://ollama.com \
     ANTHROPIC_DEFAULT_OPUS_MODEL=qwen3-coder:cloud \
     OPENAI_BASE_URL=https://ollama.com/v1 \
     OPENAI_API_KEY=__OLLAMA_API_KEY__ \
-    CHROME_BIN=/usr/bin/chromium \
     SERVER_PORT=3001 \
     HOST=0.0.0.0 \
     DATABASE_PATH=/home/agent/.cloudcli/auth.db

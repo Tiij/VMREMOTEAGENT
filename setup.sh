@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ==================== Version de cette release ====================
-INSTALLER_VERSION="1.4.2"
+INSTALLER_VERSION="1.4.4"
 STATE_FILE=".vmremoteagent.state"
 META_FILE="MANIFEST.txt"
 HEALTH_TIMEOUT=45
@@ -507,22 +507,37 @@ if [ "$RAM_KB" -gt 0 ]; then
     VERIFY_ISSUES=$((VERIFY_ISSUES+1))
   elif [ "$RAM_MB" -lt 3500 ]; then
     warn "RAM juste (${RAM_GB} Go)."
-    # Ajouter un swap de 2 Go si pas de swap actif et place disponible
+    # Ajouter un swap de 4 Go si pas de swap actif et place disponible.
+    # Sur ARM64 avec 1-2 Go de RAM, npm install de claude-code/codex/cloudcli
+    # dépasse facilement 3 Go au pic → OOM 137 sans swap suffisant.
     if [ "$(swapon --show 2>/dev/null | wc -l)" -le 1 ] && [ ! -f /swapfile ]; then
-      if [ -n "$DISK_KB" ] && [ "$DISK_KB" -gt 15728640 ]; then  # >15 Go libre (2G swap + 10G build)
-        step "Création automatique d'un fichier swap de 2 Go..."
-        if fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none; then
+      SWAP_SIZE=4G
+      SWAP_MB=4096
+      if [ "$RAM_MB" -ge 3000 ]; then SWAP_SIZE=2G; SWAP_MB=2048; fi
+      # Sur ARM64 petit (≤2 Go), on force 4G
+      ARCH_NOW="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+      case "$ARCH_NOW" in aarch64|arm64|armv7l)
+        [ "$RAM_MB" -lt 2500 ] && { SWAP_SIZE=4G; SWAP_MB=4096; }
+        ;;
+      esac
+      # Calculer espace disque nécessaire (swap + 10 Go marge build)
+      NEED_KB=$((SWAP_MB * 1024 + 10485760))
+      if [ -n "$DISK_KB" ] && [ "$DISK_KB" -gt "$NEED_KB" ]; then
+        step "Création automatique d'un fichier swap de ${SWAP_SIZE} (évite les OOM au build npm)..."
+        if fallocate -l "$SWAP_SIZE" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$SWAP_MB status=none; then
           chmod 600 /swapfile
-          if mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile; then
-            echo '/swapfile none swap sw 0 0' >> /etc/fstab
-            ok "Swap de 2 Go activé (évite les OOM au build)."
+              if mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile; then
+                echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            ok "Swap de $SWAP_SIZE activé."
           else
             warn "Échec de mkswap/swapon — continuons sans swap."
             rm -f /swapfile
-          fi
-        else
+              fi
+            else
           warn "Impossible de créer /swapfile (continuons)."
-        fi
+            fi
+      else
+        warn "Espace disque insuffisant pour créer un swap ($SWAP_SIZE nécessaires) — le build npm peut échouer avec OOM 137. Augmentez la RAM de la VM à 4 Go recommandé."
       fi
     fi
   fi
@@ -1205,9 +1220,14 @@ HTMLEOF
 cat > "$INSTALL_DIR/cloudcli/Dockerfile" <<'EOF'
 FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=Europe/Paris
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git unzip zip jq sudo htop tmux neovim ripgrep fd-find build-essential python3 python3-pip python3-venv pipx openssh-client gnupg procps xz-utils supervisor tini chromium fonts-noto-color-emoji && rm -rf /var/lib/apt/lists/*
+# chromium retiré (économie ~400 Mo + RAM build), réactivable à la main si besoin.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git unzip zip jq sudo htop tmux neovim ripgrep fd-find build-essential python3 python3-pip python3-venv pipx openssh-client gnupg procps xz-utils supervisor tini fonts-noto-color-emoji && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/* && npm install -g npm@latest
-RUN npm install -g @anthropic-ai/claude-code @openai/codex @cloudcli-ai/cloudcli
+# Installation SÉPARÉE des trois gros paquets npm pour éviter OOM 137 sur ARM64 ≤2 Go.
+ENV NODE_OPTIONS="--max-old-space-size=1024" NPM_CONFIG_FETCH_RETRIES=5 NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=10000 NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=60000 NPM_CONFIG_JOBS=1 NPM_CONFIG_MAXSOCKETS=1
+RUN npm install -g @openai/codex
+RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @cloudcli-ai/cloudcli
 RUN curl -fsSL https://code-server.dev/install.sh | sh && rm -rf /var/lib/apt/lists/*
 RUN useradd -m -u 1000 agent -s /bin/bash && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent && mkdir -p /home/agent/.cloudcli /home/agent/.claude /home/agent/.codex /home/agent/.local/share/code-server /home/agent/.config/code-server /home/agent/workspace /home/agent/.cache && chown -R agent:agent /home/agent
 RUN cat > /home/agent/.codex/config.toml <<'CODEOF'
@@ -1226,7 +1246,7 @@ disable-telemetry: true
 disable-update-check: true
 CODEOF
 RUN chown -R agent:agent /home/agent/.config
-ENV ANTHROPIC_BASE_URL=https://ollama.com ANTHROPIC_AUTH_TOKEN=__OLLAMA_API_KEY__ ANTHROPIC_API_KEY="" ANTHROPIC_MODEL=qwen3-coder:cloud ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_SONNET_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_OPUS_MODEL=qwen3-coder:cloud OPENAI_BASE_URL=https://ollama.com/v1 OPENAI_API_KEY=__OLLAMA_API_KEY__ CHROME_BIN=/usr/bin/chromium SERVER_PORT=3001 HOST=0.0.0.0 DATABASE_PATH=/home/agent/.cloudcli/auth.db
+ENV ANTHROPIC_BASE_URL=https://ollama.com ANTHROPIC_AUTH_TOKEN=__OLLAMA_API_KEY__ ANTHROPIC_API_KEY="" ANTHROPIC_MODEL=qwen3-coder:cloud ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_SONNET_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_OPUS_MODEL=qwen3-coder:cloud OPENAI_BASE_URL=https://ollama.com/v1 OPENAI_API_KEY=__OLLAMA_API_KEY__ SERVER_PORT=3001 HOST=0.0.0.0 DATABASE_PATH=/home/agent/.cloudcli/auth.db
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 WORKDIR /home/agent/workspace
 USER agent
@@ -2017,12 +2037,32 @@ case "$ACTION" in
     ;;
 esac
 
+# Limiter la concurrence BuildKit pour éviter OOM sur les VMs ARM64 avec peu de RAM.
+# BuildKit parallélise plusieurs couches à la fois et dépense ~2× plus de RAM.
+export DOCKER_BUILDKIT=1
+export BUILDKIT_PROGRESS=plain
+# Sur ARM64 / faible RAM, on limite max-parallelism à 1
+ARCH_NOW="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+COMPOSE_BUILD_OPTS=""
+case "$ARCH_NOW" in aarch64|arm64|armv7l)
+  # Détection de la RAM disponible
+  _AVAIL_RAM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+  _AVAIL_RAM_MB=$((_AVAIL_RAM_KB / 1024))
+  if [ "$_AVAIL_RAM_MB" -lt 2500 ]; then
+    COMPOSE_BUILD_OPTS="--parallel=0"
+    warn "ARM64 détecté avec ${_AVAIL_RAM_MB} Mo de RAM : concurrence BuildKit désactivée pour éviter l'OOM."
+    warn "Le build peut durer 10-25 minutes (npm installe claude-code, codex et cloudcli séquentiellement)."
+    warn "Pour aller plus vite, augmentez la RAM à 4 Go."
+  fi
+  ;;
+esac
+
 if [ "${NO_BUILD:-}" = "1" ]; then
   warn "NO_BUILD=1, démarrage ignoré. Lancez : cd $INSTALL_DIR && docker compose up -d --build"
   FINAL_STATE="setup-ok-nobuild"
 else
   cd "$INSTALL_DIR"
-  if docker compose $UP_ACTION $BUILD_ACTION 2>&1 | tee -a "$LOG_FILE"; then
+  if docker compose $UP_ACTION $BUILD_ACTION $COMPOSE_BUILD_OPTS 2>&1 | tee -a "$LOG_FILE"; then
     ok "Stack démarrée"
     FINAL_STATE="starting"
   else
@@ -2162,3 +2202,6 @@ Verrou d'installation libéré. Aucune donnée n'a été perdue.
   cleanup_lock
   exit 1
 fi
+# --- MARQUEUR DE FIN DE SCRIPT (ne pas supprimer, ne pas ajouter de code après) ---
+# Si ce marqueur est absent à l'exécution, curl a tronqué le téléchargement.
+_VMRA_EOF_MARKER=1
