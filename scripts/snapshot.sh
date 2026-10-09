@@ -42,7 +42,8 @@ VOLUMES=(
 
 # Si le stack a été lancé depuis un autre nom de dossier, détecte
 # dynamiquement le préfixe des volumes via docker compose.
-PREFIX="$(docker compose config --format json | grep -o '"Name":"[^"]*_cloudcli-data"' | head -n1 | sed 's/.*"Name":"//;s/_cloudcli-data.*//')"
+VOLUME_NAME="$(docker compose config --format json | jq -r '.volumes["cloudcli-data"].name // empty')"
+PREFIX="${VOLUME_NAME%_cloudcli-data}"
 if [ -n "$PREFIX" ]; then
   for i in "${!VOLUMES[@]}"; do
     VOLUMES[$i]="${PREFIX}_${VOLUMES[$i]#multi-agents_}"

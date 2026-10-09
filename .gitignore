@@ -1,0 +1,5 @@
+.env
+.vm-test/
+backups/
+*.log
+__pycache__/

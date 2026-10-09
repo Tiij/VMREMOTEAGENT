@@ -4,6 +4,12 @@
 
 **Une plateforme d'agents IA auto-hébergée — Claude Code + Codex, dans le navigateur, depuis n'importe où.**
 
+> Correctifs locaux v1.4.6 : utiliser `sudo bash ./setup.sh` depuis cette copie
+> pour profiter des corrections Docker/Caddy. Les liens GitHub ci-dessous ne
+> contiennent ces corrections qu'après publication. Le test Debian de 2 Go et
+> les commandes de suppression de sa VM sont documentés dans
+> [GUIDE-DEBIAN-VIERGE.md](./GUIDE-DEBIAN-VIERGE.md#test-local-debian-avec-2-go-de-ram).
+
 [CloudCLI](https://github.com/siteboon/claudecodeui) · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [Codex CLI](https://github.com/openai/codex) · [code-server](https://github.com/coder/code-server) · [Caddy](https://caddyserver.com) · [Ollama Cloud](https://ollama.com)
 
 [![License: Propriétaire](https://img.shields.io/badge/License-Propri%C3%A9taire-red.svg)]()
@@ -54,7 +60,7 @@ Les agents **Claude Code** et **Codex CLI** (officiels) sont préinstallés, pr�
 - 💻 **Développement à distance** — Depuis un Chromebook, un iPad, un PC d'emprunt ou un téléphone, retrouvez votre environnement de dev complet : éditeur VS Code, terminal, agents IA, vos projets Git.
 - 🏖️ **Coder en déplacement** — Toutes les fonctionnalités (chat, fichiers, git, terminal) fonctionnent sur mobile. Vous pouvez lancer une build ou un refactoring depuis votre téléphone pendant que vous êtes en déplacement.
 - 🤝 **Collaboration multi-agents** — Claude Code et Codex travaillent sur le même dossier. Lancez Claude pour l'architecture et Codex pour l'implémentation, ou laissez-les dialoguer.
-- 🔍 **Vérification système automatique** — L'installateur contrôle architecture, CPU, RAM, disque, ports, connectivité et distribution avant toute modification ; crée automatiquement un fichier swap de 2 Go si la VM manque de RAM pour éviter les plantages au build.
+- 🔍 **Vérification système automatique** — L'installateur contrôle architecture, CPU, RAM, disque, ports, connectivité et distribution avant toute modification ; crée automatiquement un fichier swap configurable de 1 Go par défaut si la VM manque de RAM pour éviter les plantages au build.
 - 🎛️ **Interface d'installation interactive (TUI)** — Assistant d'onboarding en mode terminal avec boîtes de dialogue, barre de progression en temps réel, invites masquées pour la clé API, écran de bienvenue et de fin (whiptail, installé automatiquement si absent) ; fonctionne aussi en mode texte brut ou en CI avec `NONINTERACTIVE=1`.
 - 🔒 **Verrou d'instance** — Impossible de lancer deux installations en parallèle ; un plantage ne laisse pas de verrou orphelin.
 - ✅ **Détection fiable du succès/échec** — Écran final avec les URLs si tout va bien, ou avec les consignes de rollback/diagnostic si quelque chose casse ; code de sortie shell adapté.
@@ -91,7 +97,7 @@ Les agents **Claude Code** et **Codex CLI** (officiels) sont préinstallés, pr�
     │  ├─ codex (OpenAI CLI)                                  │
     │  ├─ code-server (VS Code web)                           │
     │  ├─ cloudcli serve (frontend/API)                       │
-    │  └─ Chromium, Node 22, git, python, pip, neovim, ripgrep│
+    │  └─ Node 22, git, python, ripgrep                    │
     └──────────────────────┬──────────────────────────────────┘
                            │ ANTHROPIC_BASE_URL=https://ollama.com
                            │ OPENAI_BASE_URL=https://ollama.com/v1
@@ -106,15 +112,15 @@ Les agents **Claude Code** et **Codex CLI** (officiels) sont préinstallés, pr�
 
 | Composant | Version | Rôle |
 |---|---|---|
-| **CloudCLI** (`@cloudcli-ai/cloudcli`) | latest | Frontend web/mobile multi-agents |
-| **Claude Code CLI** (`@anthropic-ai/claude-code`) | latest | Agent Anthropic officiel |
-| **Codex CLI** (`@openai/codex`) | latest | Agent OpenAI officiel |
-| **code-server** | latest | VS Code dans le navigateur |
+| **CloudCLI** (`@cloudcli-ai/cloudcli`) | 1.37.4 | Frontend web/mobile multi-agents |
+| **Claude Code CLI** (`@anthropic-ai/claude-code`) | 2.1.295 | Agent Anthropic officiel |
+| **Codex CLI** (`@openai/codex`) | 0.162.0 | Agent OpenAI officiel |
+| **code-server** | 4.141.0 | VS Code dans le navigateur |
 | **Caddy 2 (alpine)** | latest | Reverse proxy HTTPS + certificats |
 | **Debian Bookworm** (image conteneur) | slim | Base du conteneur agents |
 | **Node.js** | 22 LTS | Runtime des CLIs |
-| **Chromium** | latest | Pour le MCP browser-use |
-| **Modèle par défaut** | `qwen3-coder:cloud` | Via Ollama Cloud (changeable) |
+| **Chromium** | non installé | Installation optionnelle pour browser-use |
+| **Modèle par défaut** | `glm-5.3-flash` | Via Ollama Cloud, configurable dans `.env` |
 
 ---
 
@@ -123,7 +129,7 @@ Les agents **Claude Code** et **Codex CLI** (officiels) sont préinstallés, pr�
 ### 1. Prérequis
 
 - Une machine Linux (l'installateur installe automatiquement Docker sur **Debian/Ubuntu, Fedora/RHEL/Rocky/Alma, Arch/Manjaro, Alpine, openSUSE** via le gestionnaire de paquets adapté) — ou macOS/Windows avec Docker Desktop.
-- **2 vCPU / 4 Go RAM minimum** (8 Go recommandés si vous utilisez plusieurs agents en parallèle).
+- **2 vCPU / 2 Go RAM** pour un test avec un agent à la fois ; 4 Go recommandés pour l'usage quotidien.
 - Ports **80, 443 et 3001** ouverts si c'est une VM exposée sur Internet.
 - Une **clé API Ollama Cloud** → https://ollama.com/settings/keys
 
@@ -194,7 +200,7 @@ Chaque couche a été pensée pour qu'un agent qui dérape ne puisse pas casser 
 
 | Couche | Protection |
 |---|---|
-| **Isolation Docker** | Tous les processus (`claude`, `codex`, `code-server`, CloudCLI, Chromium) s'exécutent dans un seul conteneur, en tant qu'utilisateur non-root `agent` (uid 1000). |
+| **Isolation Docker** | Tous les processus (`claude`, `codex`, `code-server`, CloudCLI) s'exécutent dans un seul conteneur, en tant qu'utilisateur non-root `agent` (uid 1000). |
 | **Socket Docker non monté** | Les agents ne peuvent pas lancer/arrêter d'autres conteneurs ni s'échapper via Docker. |
 | **Pas de privilège** | Pas de `--privileged`, pas de capacités kernel étendues. |
 | **Accès réseau sortant** | Les agents peuvent joindre Internet (git, npm, Ollama Cloud), mais Caddy n'expose que 80, 443 et 3001. |
@@ -257,7 +263,7 @@ Les scripts dans `scripts/` gèrent les sauvegardes automatiques et manuelles. V
 ./scripts/factory-reset.sh                  # reset complet
 ```
 
-Par défaut : sauvegarde automatique quotidienne à ~6h25 (cron.daily), 14 snapshots conservés, logs dans `/var/log/cloudcli-snapshot.log`.
+Par défaut : sauvegarde automatique quotidienne à ~6h25 (cron.daily), 3 snapshots automatiques conservés, logs dans `/var/log/cloudcli-snapshot.log`.
 
 ---
 
@@ -331,13 +337,13 @@ docker compose up -d                    # redémarrer pour prendre en compte
 
 ### Changer de modèle LLM
 
-Par défaut : `qwen3-coder:cloud` (excellent pour le code). Vous pouvez utiliser n'importe quel modèle disponible sur [ollama.com/search](https://ollama.com/search) (filtre *Cloud*) :
+Par défaut : `glm-5.3-flash`. Choisir un modèle disponible dans le [catalogue Cloud](https://ollama.com/search?c=cloud), avec son nom d'API exact :
 
-- **Claude Code** (dans une session) : tapez `/model <nom-du-modele:cloud>`.
+- **Claude Code** (dans une session) : tapez `/model <nom-du-modele>`.
 - **Codex** : `codex -m <nom-du-modele>` dans le terminal, ou via le sélecteur CloudCLI.
-- **Défaut permanent** : modifiez `qwen3-coder:cloud` dans `cloudcli/Dockerfile` puis `docker compose build cloudcli && docker compose up -d`.
+- **Défaut permanent des deux agents** : modifiez `OLLAMA_MODEL` dans `.env`, puis `docker compose up -d`. Le script de démarrage est monté depuis les sources pour appliquer ces réglages sans reconstruire les paquets.
 
-Modèles cloud populaires : `deepseek-v3.1:671b`, `llama-4-scout:cloud`, `glm-5:cloud`, `qwen3-coder:cloud`, `mistral-large:cloud`.
+Exemples présents lors du test : `glm-5.3-flash`, `gpt-oss:20b`, `gemma4:31b`. Le catalogue peut évoluer ; le suffixe `:cloud` utilisé par un serveur Ollama local ne doit pas être ajouté aux noms de l'API directe.
 
 ### Utiliser un vrai nom de domaine + Let's Encrypt
 

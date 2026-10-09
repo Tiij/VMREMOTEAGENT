@@ -17,7 +17,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
-KEEP="${SNAPSHOT_KEEP:-14}"
+KEEP="${SNAPSHOT_KEEP:-$(sed -n 's/^SNAPSHOT_KEEP=//p' .env 2>/dev/null | head -n 1)}"
+KEEP="${KEEP:-3}"
+[[ "$KEEP" =~ ^[1-9][0-9]*$ ]] || { echo "SNAPSHOT_KEEP doit être positif." >&2; exit 1; }
 LOG_DIR="${SNAPSHOT_LOG_DIR:-/var/log}"
 LOG_FILE="${LOG_DIR}/cloudcli-snapshot.log"
 mkdir -p "$(dirname "$LOG_FILE")" "$SCRIPT_DIR/backups"

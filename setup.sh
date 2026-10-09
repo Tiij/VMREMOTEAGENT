@@ -19,10 +19,10 @@
 set -euo pipefail
 
 # ==================== Version de cette release ====================
-INSTALLER_VERSION="1.4.5"
+INSTALLER_VERSION="1.4.6"
 STATE_FILE=".vmremoteagent.state"
 META_FILE="MANIFEST.txt"
-HEALTH_TIMEOUT=45
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/multi-agents}"
 LOG_FILE="$INSTALL_DIR/install.log"
@@ -49,7 +49,9 @@ ok(){ echo -e "${GREEN}✔${NC} $*"; }
 
 # ==================== Nettoyage du lock à la sortie ====================
 cleanup_lock() {
-  rm -f "$LOCK_FILE" "$PROGRESS_FILE" 2>/dev/null || true
+  # Ne pas supprimer l'inode verrouillé : un concurrent pourrait verrouiller
+  # un autre inode portant le même nom. Le noyau libère flock à la sortie.
+  rm -f "$PROGRESS_FILE" 2>/dev/null || true
   # Restaurer le terminal si whiptail l'a cassé
   [ -t 1 ] && stty sane 2>/dev/null || true
 }
@@ -91,20 +93,12 @@ fi
 # On crée le dossier d'installation pour avoir le droit d'écrire dans LOG_FILE
 mkdir -p "$INSTALL_DIR" 2>/dev/null || die "Impossible de créer $INSTALL_DIR."
 
-if [ -f "$LOCK_FILE" ]; then
-  OTHER_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "?")
-  if [ -n "$OTHER_PID" ] && kill -0 "$OTHER_PID" 2>/dev/null; then
-    echo -e "${RED}✘${NC} Une autre instance de setup.sh est déjà en cours (PID $OTHER_PID)."
-    echo "   Si vous êtes certain qu'aucune installation n'est en cours,"
-    echo "   supprimez le verrou avec :  sudo rm -f $LOCK_FILE"
-    exit 1
-  else
-    # Verrou orphelin (processus mort) → on le supprime
-    warn "Verrou orphelin détecté (PID $OTHER_PID n'existe plus) — nettoyage."
-    rm -f "$LOCK_FILE"
-  fi
-fi
-echo $$ > "$LOCK_FILE"
+# flock effectue atomiquement acquisition et test dans le noyau, contrairement
+# au couple test de PID / écriture, qui autorisait deux installateurs concurrents.
+command -v flock >/dev/null 2>&1 || die "Installez util-linux (flock requis)."
+exec 9>"$LOCK_FILE"
+flock -n 9 || die "Une autre installation est déjà en cours."
+echo $$ >&9
 ok "Verrou d'installation créé (PID $$)"
 
 cd "$INSTALL_DIR"; :> "$LOG_FILE"
@@ -119,7 +113,7 @@ cd "$INSTALL_DIR"; :> "$LOG_FILE"
 if [ -z "${INTERACTIVE_OUT:-}" ]; then
   if [ -t 2 ]; then
     INTERACTIVE_OUT=2
-  elif [ -c /dev/tty ] && [ -w /dev/tty ]; then
+  elif [ "$NONINTERACTIVE" != "1" ] && [ -c /dev/tty ] && [ -w /dev/tty ]; then
     exec 8>/dev/tty 2>/dev/null && INTERACTIVE_OUT=8 || INTERACTIVE_OUT=2
   else
     INTERACTIVE_OUT=2
@@ -410,7 +404,14 @@ fi
 FORCE_ACTION="$DETECTED_ACTION"
 
 # --- Clé API Ollama ---
-if [ -z "${OLLAMA_API_KEY:-}" ]; then
+# Relancer sans ressaisir une clé déjà configurée.
+OLLAMA_API_KEY_ENV="${OLLAMA_API_KEY:-}"
+OLLAMA_API_KEY="${OLLAMA_API_KEY:-}"
+if [ -z "${OLLAMA_API_KEY:-}" ] && [ -f "$INSTALL_DIR/.env" ]; then
+  OLLAMA_API_KEY=$(sed -n 's/^OLLAMA_API_KEY=//p' "$INSTALL_DIR/.env" | head -n 1)
+fi
+if [ -z "${OLLAMA_API_KEY:-}" ] && [ "${ALLOW_NO_API_KEY:-0}" != "1" ]; then
+  [ "$NONINTERACTIVE" != "1" ] || die "OLLAMA_API_KEY absent. Pour un test sans IA : ALLOW_NO_API_KEY=1."
   # Proposer de coller directement ou ouvrir un rappel
   if yesno "Clé API Ollama Cloud" "Avez-vous déjà une clé API Ollama Cloud ?\n\nSi ce n'est pas le cas, allez sur :\n  https://ollama.com/settings/keys\n\nVous pouvez en créer une en 30 secondes (gratuit)." 0; then
     :
@@ -424,7 +425,7 @@ if [ -z "${OLLAMA_API_KEY:-}" ]; then
     fi
   done
 fi
-ok "Clé Ollama Cloud configurée"
+if [ -n "${OLLAMA_API_KEY:-}" ]; then ok "Clé Ollama Cloud configurée"; else warn "Test sans clé : les services démarrent, inférence IA indisponible."; fi
 
 # --- Host / domaine ---
 DEFAULT_HOST=""
@@ -507,37 +508,25 @@ if [ "$RAM_KB" -gt 0 ]; then
     VERIFY_ISSUES=$((VERIFY_ISSUES+1))
   elif [ "$RAM_MB" -lt 3500 ]; then
     warn "RAM juste (${RAM_GB} Go)."
-    # Ajouter un swap de 4 Go si pas de swap actif et place disponible.
-    # Sur ARM64 avec 1-2 Go de RAM, npm install de claude-code/codex/cloudcli
-    # dépasse facilement 3 Go au pic → OOM 137 sans swap suffisant.
-    if [ "$(swapon --show 2>/dev/null | wc -l)" -le 1 ] && [ ! -f /swapfile ]; then
-      SWAP_SIZE=4G
-      SWAP_MB=4096
-      if [ "$RAM_MB" -ge 3000 ]; then SWAP_SIZE=2G; SWAP_MB=2048; fi
-      # Sur ARM64 petit (≤2 Go), on force 4G
-      ARCH_NOW="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-      case "$ARCH_NOW" in aarch64|arm64|armv7l)
-        [ "$RAM_MB" -lt 2500 ] && { SWAP_SIZE=4G; SWAP_MB=4096; }
-        ;;
-      esac
-      # Calculer espace disque nécessaire (swap + 10 Go marge build)
-      NEED_KB=$((SWAP_MB * 1024 + 10485760))
-      if [ -n "$DISK_KB" ] && [ "$DISK_KB" -gt "$NEED_KB" ]; then
-        step "Création automatique d'un fichier swap de ${SWAP_SIZE} (évite les OOM au build npm)..."
-        if fallocate -l "$SWAP_SIZE" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$SWAP_MB status=none; then
+    # Swap limité et configurable ; aucun fichier de 4 Go créé par défaut.
+    if [ "$(swapon --show --noheadings 2>/dev/null | wc -l)" -eq 0 ] && [ ! -f /swapfile ]; then
+      SWAP_MB="${SWAP_MB:-1024}"
+      [[ "$SWAP_MB" =~ ^[0-9]+$ ]] || die "SWAP_MB doit être un entier."
+      NEED_KB=$((SWAP_MB * 1024 + 5242880))
+      if [ "$SWAP_MB" -gt 0 ] && [ "${DISK_KB:-0}" -gt "$NEED_KB" ]; then
+        step "Création d'un swap de ${SWAP_MB} Mo..."
+        if fallocate -l "${SWAP_MB}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB" status=none; then
           chmod 600 /swapfile
-              if mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile; then
-                echo '/swapfile none swap sw 0 0' >> /etc/fstab
-            ok "Swap de $SWAP_SIZE activé."
+          if mkswap /swapfile >/dev/null && swapon /swapfile; then
+            grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            ok "Swap activé (${SWAP_MB} Mo)."
           else
-            warn "Échec de mkswap/swapon — continuons sans swap."
+            warn "Swap non activé."
             rm -f /swapfile
-              fi
-            else
-          warn "Impossible de créer /swapfile (continuons)."
-            fi
+          fi
+        fi
       else
-        warn "Espace disque insuffisant pour créer un swap ($SWAP_SIZE nécessaires) — le build npm peut échouer avec OOM 137. Augmentez la RAM de la VM à 4 Go recommandé."
+        warn "Swap désactivé ou espace disque insuffisant."
       fi
     fi
   fi
@@ -649,9 +638,6 @@ install_deps_apt() {
   apt-get install -y --no-install-recommends \
     ca-certificates curl git wget sudo nano gnupg lsb-release \
     vim-common cron coreutils procps jq apt-transport-https iptables
-  # software-properties-common n'est pas disponible sur toutes les
-  # variantes (Debian testing/trixie, certains conteneurs) ; optionnel
-  apt-get install -y --no-install-recommends software-properties-common 2>/dev/null || true
 }
 
 install_deps_dnf() {
@@ -737,7 +723,7 @@ install_docker_apt() {
   echo "deb [arch=${ARCH_DOCKER} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable" \
     > /etc/apt/sources.list.d/docker.list
   apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io \
+  apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io \
                      docker-buildx-plugin docker-compose-plugin
 }
 
@@ -1047,9 +1033,9 @@ mkdir -p "$INSTALL_DIR"/{cloudcli,scripts,backups,dashboard}
 # Conserver l'ancien secret si .env existe déjà (évite d'invalider les comptes CloudCLI)
 EXISTING_SECRET=""; EXISTING_OLLAMA=""; EXISTING_WEBUI=""
 if [ -f "$INSTALL_DIR/.env" ]; then
-  EXISTING_SECRET=$(grep -E '^WEBUI_SECRET_KEY=' "$INSTALL_DIR/.env" | cut -d= -f2-)
-  EXISTING_OLLAMA=$(grep -E '^OLLAMA_API_KEY=' "$INSTALL_DIR/.env" | cut -d= -f2-)
-  EXISTING_WEBUI=$(grep -E '^WEBUI_URL=' "$INSTALL_DIR/.env" | cut -d= -f2-)
+  EXISTING_SECRET=$(sed -n 's/^WEBUI_SECRET_KEY=//p' "$INSTALL_DIR/.env")
+  EXISTING_OLLAMA=$(sed -n 's/^OLLAMA_API_KEY=//p' "$INSTALL_DIR/.env")
+  EXISTING_WEBUI=$(sed -n 's/^WEBUI_URL=//p' "$INSTALL_DIR/.env")
 fi
 SECRET="${EXISTING_SECRET:-$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)}"
 # Ne pas écraser la clé Ollama existante si elle est valide et qu'on n'a pas passé la nouvelle
@@ -1065,9 +1051,22 @@ if [ -n "$EXISTING_WEBUI" ] && [ "${HOSTNAME_PUBLIQUE:-}" = "localhost" ] && [ "
   HOSTNAME_PUBLIQUE="${HOSTNAME_PUBLIQUE%/}"
 fi
 
+EXISTING_IDE_PASSWORD=""
+EXISTING_OLLAMA_MODEL=""
+if [ -f "$INSTALL_DIR/.env" ]; then
+  EXISTING_IDE_PASSWORD=$(sed -n 's/^CODE_SERVER_PASSWORD=//p' "$INSTALL_DIR/.env")
+  EXISTING_OLLAMA_MODEL=$(sed -n 's/^OLLAMA_MODEL=//p' "$INSTALL_DIR/.env")
+fi
+CODE_SERVER_PASSWORD="${CODE_SERVER_PASSWORD:-${EXISTING_IDE_PASSWORD:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-${EXISTING_OLLAMA_MODEL:-glm-5.3-flash}}"
 cat > "$INSTALL_DIR/.env" <<EOF
 # Généré par setup.sh le $(date -Iseconds)
 OLLAMA_API_KEY=${OLLAMA_API_KEY}
+OLLAMA_MODEL=${OLLAMA_MODEL}
+ALLOW_NO_API_KEY=${ALLOW_NO_API_KEY:-0}
+HOSTNAME_PUBLIQUE=${HOSTNAME_PUBLIQUE}
+CODE_SERVER_PASSWORD=${CODE_SERVER_PASSWORD}
+SNAPSHOT_KEEP=${SNAPSHOT_KEEP:-3}
 WEBUI_URL=https://${HOSTNAME_PUBLIQUE}
 ENABLE_SIGNUP=true
 WEBUI_SECRET_KEY=${SECRET}
@@ -1076,24 +1075,44 @@ chmod 600 "$INSTALL_DIR/.env"
 
 # ----- docker-compose.yml -----
 cat > "$INSTALL_DIR/docker-compose.yml" <<'EOF'
+name: multi-agents
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "5m"
+    max-file: "2"
+
 services:
   cloudcli:
     build: ./cloudcli
     image: multi-agents-cloudcli:latest
     container_name: cloudcli
     restart: unless-stopped
+    mem_limit: ${CLOUDCLI_MEMORY_LIMIT:-1400m}
+    memswap_limit: ${CLOUDCLI_SWAP_LIMIT:-2g}
     environment:
-      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
-      - SERVER_PORT=3001
-      - HOST=0.0.0.0
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-5.3-flash}
+      CODE_SERVER_PASSWORD: ${CODE_SERVER_PASSWORD:?Définissez le mot de passe IDE dans .env}
+      SERVER_PORT: "3001"
+      HOST: 0.0.0.0
+      NODE_OPTIONS: --max-old-space-size=384
     volumes:
+      - ./cloudcli/entrypoint.sh:/home/agent/entrypoint.sh:ro
       - cloudcli-data:/home/agent/.cloudcli
       - claude-data:/home/agent/.claude
       - codex-data:/home/agent/.codex
       - codeserver-data:/home/agent/.local/share/code-server
       - codeserver-config:/home/agent/.config/code-server
       - projects:/home/agent/workspace
-    shm_size: "2g"
+    shm_size: "64m"
+    logging: *logging
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 3 http://127.0.0.1:3001/ >/dev/null && curl -fsS --max-time 3 http://127.0.0.1:8080/healthz >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
     networks: [agent-net]
     expose: ["3001", "8080"]
 
@@ -1101,10 +1120,14 @@ services:
     image: caddy:2-alpine
     container_name: caddy
     restart: unless-stopped
+    mem_limit: 128m
+    logging: *logging
+    environment:
+      HOSTNAME_PUBLIQUE: ${HOSTNAME_PUBLIQUE:-localhost}
     ports:
-      - "80:80"
-      - "443:443"
-      - "3001:3001"
+      - "${BIND_ADDRESS:-0.0.0.0}:80:80"
+      - "${BIND_ADDRESS:-0.0.0.0}:443:443"
+      - "${BIND_ADDRESS:-0.0.0.0}:3001:3001"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./dashboard:/srv/dashboard:ro
@@ -1122,7 +1145,6 @@ volumes:
   projects:
   caddy-data:
   caddy-config:
-
 networks:
   agent-net:
     driver: bridge
@@ -1130,40 +1152,52 @@ EOF
 
 # ----- Caddyfile -----
 cat > "$INSTALL_DIR/Caddyfile" <<'EOF'
-http://:80, http://:8080 { redir https://{host}{uri} permanent }
-http://:3000 { redir https://{host}:3001{uri} permanent }
-
-https://:443 {
-    request_body { max_size 500MB }
-    handle /* { root * /srv/dashboard; file_server }
-    handle_path /ide/* {
-        rewrite /ide/* /{uri_slice[2:]}
-        reverse_proxy cloudcli:8080 {
-            header_up Host {host}
-            header_up X-Real-IP {remote_host}
-            header_up X-Forwarded-Proto {scheme}
-            header_up X-Forwarded-Prefix /ide/
-            header_up Upgrade {>Upgrade}
-            header_up Connection {>Connection}
-            transport http { response_header_timeout 0 }
-        }
-    }
-    header { X-Content-Type-Options nosniff; X-Frame-Options SAMEORIGIN; Referrer-Policy strict-origin-when-cross-origin; -Server }
-    tls internal; flush_interval -1
+{
+    default_sni {$HOSTNAME_PUBLIQUE:localhost}
 }
 
-https://:3001 {
-    request_body { max_size 500MB }
-    reverse_proxy cloudcli:3001 {
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-        header_up Upgrade {>Upgrade}
-        header_up Connection {>Connection}
-        transport http { response_header_timeout 0 }
+http://:80 {
+    redir https://{host}{uri} permanent
+}
+
+# Des noms explicites permettent de générer les certificats internes.
+# 127.0.0.1 permet les diagnostics depuis la VM sans DNS public.
+https://{$HOSTNAME_PUBLIQUE:localhost}, https://127.0.0.1 {
+    tls internal
+    request_body {
+        max_size 32MB
     }
-    header { X-Content-Type-Options nosniff; X-Frame-Options SAMEORIGIN; Referrer-Policy strict-origin-when-cross-origin; -Server }
-    tls internal; flush_interval -1
+    redir /ide /ide/ 308
+    handle_path /ide/* {
+        reverse_proxy cloudcli:8080 {
+            flush_interval -1
+        }
+    }
+    handle {
+        root * /srv/dashboard
+        file_server
+    }
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+}
+https://{$HOSTNAME_PUBLIQUE:localhost}:3001, https://127.0.0.1:3001 {
+    tls internal
+    request_body {
+        max_size 32MB
+    }
+    reverse_proxy cloudcli:3001 {
+        flush_interval -1
+    }
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
 }
 EOF
 
@@ -1218,82 +1252,165 @@ HTMLEOF
 
 # ----- cloudcli/Dockerfile -----
 cat > "$INSTALL_DIR/cloudcli/Dockerfile" <<'EOF'
-FROM debian:bookworm-slim
-ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=Europe/Paris
-# chromium retiré (économie ~400 Mo + RAM build), réactivable à la main si besoin.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git unzip zip jq sudo htop tmux neovim ripgrep fd-find build-essential python3 python3-pip python3-venv pipx openssh-client gnupg procps xz-utils supervisor tini fonts-noto-color-emoji && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/* && npm install -g npm@latest
-# Installation SÉPARÉE des trois gros paquets npm pour éviter OOM 137 sur ARM64 ≤2 Go.
-ENV NODE_OPTIONS="--max-old-space-size=1024" NPM_CONFIG_FETCH_RETRIES=5 NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=10000 NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=60000 NPM_CONFIG_JOBS=1 NPM_CONFIG_MAXSOCKETS=1
-RUN npm install -g @openai/codex
-RUN npm install -g @anthropic-ai/claude-code
-RUN npm install -g @cloudcli-ai/cloudcli
-RUN curl -fsSL https://code-server.dev/install.sh | sh && rm -rf /var/lib/apt/lists/*
-RUN useradd -m -u 1000 agent -s /bin/bash && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent && mkdir -p /home/agent/.cloudcli /home/agent/.claude /home/agent/.codex /home/agent/.local/share/code-server /home/agent/.config/code-server /home/agent/workspace /home/agent/.cache && chown -R agent:agent /home/agent
-RUN cat > /home/agent/.codex/config.toml <<'CODEOF'
-model_provider = "ollama_cloud"
-model = "qwen3-coder:cloud"
-[model_providers.ollama_cloud]
-name = "Ollama Cloud"
-base_url = "https://ollama.com/v1"
-env_key = "OLLAMA_API_KEY"
-oss_provider = "ollama_cloud"
-CODEOF
-RUN cat > /home/agent/.config/code-server/config.yaml <<'CODEOF'
-bind-addr: 0.0.0.0:8080
-auth: none
-disable-telemetry: true
-disable-update-check: true
-CODEOF
-RUN chown -R agent:agent /home/agent/.config
-ENV ANTHROPIC_BASE_URL=https://ollama.com ANTHROPIC_AUTH_TOKEN=__OLLAMA_API_KEY__ ANTHROPIC_API_KEY="" ANTHROPIC_MODEL=qwen3-coder:cloud ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_SONNET_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3-coder:cloud ANTHROPIC_DEFAULT_OPUS_MODEL=qwen3-coder:cloud OPENAI_BASE_URL=https://ollama.com/v1 OPENAI_API_KEY=__OLLAMA_API_KEY__ SERVER_PORT=3001 HOST=0.0.0.0 DATABASE_PATH=/home/agent/.cloudcli/auth.db
+# syntax=docker/dockerfile:1
+FROM node:22-bookworm-slim
+ARG CLOUDCLI_VERSION=1.37.4
+ARG CODEX_VERSION=0.162.0
+ARG CLAUDE_VERSION=2.1.295
+ARG CODE_SERVER_VERSION=4.141.0
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=Europe/Paris \
+    NODE_OPTIONS="--max-old-space-size=384" \
+    NPM_CONFIG_MAXSOCKETS=2 NPM_CONFIG_JOBS=1 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# Compilateurs temporaires, supprimés avec les caches dans la même couche.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates curl git jq sudo openssh-client procps supervisor tini \
+       python3 ripgrep xz-utils build-essential \
+    && npm install -g --omit=dev --no-audit --no-fund "@cloudcli-ai/cloudcli@${CLOUDCLI_VERSION}" \
+    && npm install -g --omit=dev --no-audit --no-fund "@openai/codex@${CODEX_VERSION}" \
+    && npm install -g --omit=dev --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+    && npm cache clean --force \
+    && apt-get purge -y --auto-remove build-essential \
+    && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache /tmp/*
+
+# Archive autonome : pas de cache .deb ni d'installation Node supplémentaire.
+RUN arch="$(dpkg --print-architecture)" \
+    && curl -fL --retry 3 \
+       "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-${arch}.tar.gz" \
+       | tar -xz -C /opt \
+    && mv "/opt/code-server-${CODE_SERVER_VERSION}-linux-${arch}" /opt/code-server \
+    && ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server
+
+# La base Node fournit déjà l'uid 1000.
+RUN groupmod -n agent node \
+    && usermod -l agent -d /home/agent -m node \
+    && printf 'agent ALL=(root) NOPASSWD: /usr/bin/chown\n' > /etc/sudoers.d/agent \
+    && mkdir -p /home/agent/.cloudcli /home/agent/.claude /home/agent/.codex \
+       /home/agent/.local/share/code-server /home/agent/.config/code-server \
+       /home/agent/workspace /home/agent/.cache \
+    && chown -R agent:agent /home/agent
+
+ENV ANTHROPIC_BASE_URL=https://ollama.com ANTHROPIC_API_KEY="" \
+    ANTHROPIC_MODEL=glm-5.3-flash OPENAI_BASE_URL=https://ollama.com/v1 \
+    SERVER_PORT=3001 HOST=0.0.0.0 \
+    DATABASE_PATH=/home/agent/.cloudcli/auth.db HOME=/home/agent
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY --chown=agent:agent --chmod=755 entrypoint.sh /home/agent/entrypoint.sh
 WORKDIR /home/agent/workspace
 USER agent
-COPY --chown=agent:agent entrypoint.sh /home/agent/entrypoint.sh
-USER root;RUN chmod +x /home/agent/entrypoint.sh && chown agent:agent /home/agent/entrypoint.sh;USER agent
 EXPOSE 3001 8080
-ENTRYPOINT ["/usr/bin/tini","--","/home/agent/entrypoint.sh"]
-CMD ["/usr/bin/supervisord","-c","/etc/supervisor/conf.d/supervisord.conf"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/home/agent/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
 EOF
 
 # ----- cloudcli/entrypoint.sh -----
 cat > "$INSTALL_DIR/cloudcli/entrypoint.sh" <<'EOF'
-#!/bin/bash
-set -e
-KEY="${OLLAMA_API_KEY:-ollama}";export ANTHROPIC_AUTH_TOKEN="$KEY";export OPENAI_API_KEY="$KEY"
-cat >> /home/agent/.bashrc <<BASHEOF
-export OLLAMA_API_KEY="$KEY"
-export ANTHROPIC_BASE_URL=https://ollama.com
-export ANTHROPIC_AUTH_TOKEN="$KEY"
-export ANTHROPIC_API_KEY=""
-export ANTHROPIC_MODEL=qwen3-coder:cloud
-export ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder:cloud
-export ANTHROPIC_DEFAULT_SONNET_MODEL=qwen3-coder:cloud
-export ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3-coder:cloud
-export ANTHROPIC_DEFAULT_OPUS_MODEL=qwen3-coder:cloud
-export OPENAI_BASE_URL=https://ollama.com/v1
-export OPENAI_API_KEY="$KEY"
-BASHEOF
-mkdir -p /home/agent/.claude
-cat > /home/agent/.claude/settings.json <<JSONEOF
-{"env":{"ANTHROPIC_BASE_URL":"https://ollama.com","ANTHROPIC_AUTH_TOKEN":"$KEY","ANTHROPIC_API_KEY":"","ANTHROPIC_MODEL":"qwen3-coder:cloud","ANTHROPIC_SMALL_FAST_MODEL":"qwen3-coder:cloud","ANTHROPIC_DEFAULT_SONNET_MODEL":"qwen3-coder:cloud","ANTHROPIC_DEFAULT_HAIKU_MODEL":"qwen3-coder:cloud","ANTHROPIC_DEFAULT_OPUS_MODEL":"qwen3-coder:cloud"}}
-JSONEOF
-sudo chown -R agent:agent /home/agent/.cloudcli /home/agent/.claude /home/agent/.codex /home/agent/workspace /home/agent/.config /home/agent/.local 2>/dev/null || true
-cd /home/agent/workspace;exec "$@"
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+: "${CODE_SERVER_PASSWORD:?Définissez CODE_SERVER_PASSWORD dans .env}"
+export ANTHROPIC_AUTH_TOKEN="${OLLAMA_API_KEY:-}"
+export OPENAI_API_KEY="${OLLAMA_API_KEY:-}"
+export PASSWORD="$CODE_SERVER_PASSWORD"
+export ANTHROPIC_MODEL="${OLLAMA_MODEL:-${ANTHROPIC_MODEL:-glm-5.3-flash}}"
+[[ "$ANTHROPIC_MODEL" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:-]*$ ]] || {
+    echo "OLLAMA_MODEL contient un nom de modèle invalide." >&2; exit 2;
+}
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$ANTHROPIC_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$ANTHROPIC_MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$ANTHROPIC_MODEL"
+
+# Seulement les racines des volumes : aucun parcours du workspace au démarrage.
+sudo chown agent:agent /home/agent/.cloudcli /home/agent/.claude \
+    /home/agent/.codex /home/agent/workspace /home/agent/.config/code-server \
+    /home/agent/.local/share/code-server
+
+# Les shells héritent de l'environnement : aucune clé ajoutée à .bashrc.
+# Conserver les paramètres Claude existants et fusionner uniquement env.
+settings=/home/agent/.claude/settings.json
+tmp=$(mktemp /home/agent/.claude/settings.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+if [ ! -f "$settings" ]; then printf '{}\n' > "$settings"; fi
+jq '.env = ((.env // {}) + {
+    ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL,
+    ANTHROPIC_AUTH_TOKEN: env.ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_API_KEY: "",
+    ANTHROPIC_MODEL: env.ANTHROPIC_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: env.ANTHROPIC_MODEL,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: env.ANTHROPIC_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: env.ANTHROPIC_MODEL
+})' "$settings" > "$tmp"
+chmod 600 "$tmp"
+mv "$tmp" "$settings"
+trap - EXIT
+
+if [ ! -s /home/agent/.codex/config.toml ]; then
+    cat > /home/agent/.codex/config.toml <<CODEOF
+model_provider = "ollama_cloud"
+model = "$ANTHROPIC_MODEL"
+web_search = "disabled"
+
+[model_providers.ollama_cloud]
+name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+env_key = "OLLAMA_API_KEY"
+wire_api = "responses"
+CODEOF
+elif grep -q '^model_provider = "ollama_cloud"$' /home/agent/.codex/config.toml; then
+    # Le modèle du fournisseur géré suit .env ; conserver les autres paramètres.
+    sed -i "s/^model = .*/model = \"$ANTHROPIC_MODEL\"/" /home/agent/.codex/config.toml
+fi
+cat > /home/agent/.config/code-server/config.yaml <<'CODEOF'
+bind-addr: 0.0.0.0:8080
+auth: password
+disable-telemetry: true
+disable-update-check: true
+CODEOF
+cd /home/agent/workspace
+exec "$@"
 EOF
 chmod +x "$INSTALL_DIR/cloudcli/entrypoint.sh"
 
 # ----- cloudcli/supervisord.conf -----
 cat > "$INSTALL_DIR/cloudcli/supervisord.conf" <<'EOF'
 [supervisord]
-nodaemon=true;user=agent;logfile=/tmp/supervisord.log;pidfile=/tmp/supervisord.pid;logfile_maxbytes=10MB;logfile_backups=2
+nodaemon=true
+user=agent
+logfile=/tmp/supervisord.log
+pidfile=/tmp/supervisord.pid
+logfile_maxbytes=1MB
+logfile_backups=1
+
 [program:cloudcli]
 command=/usr/local/bin/cloudcli start --port 3001
-directory=/home/agent/workspace;environment=HOME="/home/agent",USER="agent";autostart=true;autorestart=true;stdout_logfile=/dev/stdout;stdout_logfile_maxbytes=0;stderr_logfile=/dev/stderr;stderr_logfile_maxbytes=0;stopsignal=SIGTERM;stopwaitsecs=15
+directory=/home/agent/workspace
+environment=HOME="/home/agent",USER="agent"
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+stopsignal=SIGTERM
+stopwaitsecs=15
+stopasgroup=true
+killasgroup=true
+
 [program:codeserver]
-command=/usr/bin/code-server --bind-addr 0.0.0.0:8080 --disable-telemetry --auth none --proxy-prefix /ide /home/agent/workspace
-directory=/home/agent/workspace;environment=HOME="/home/agent",USER="agent";autostart=true;autorestart=true;stdout_logfile=/dev/stdout;stdout_logfile_maxbytes=0;stderr_logfile=/dev/stderr;stderr_logfile_maxbytes=0;stopsignal=SIGTERM;stopwaitsecs=15
+command=/usr/local/bin/code-server --bind-addr 0.0.0.0:8080 --disable-telemetry /home/agent/workspace
+directory=/home/agent/workspace
+environment=HOME="/home/agent",USER="agent"
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+stopsignal=SIGTERM
+stopwaitsecs=15
+stopasgroup=true
+killasgroup=true
 EOF
 
 # ----- scripts/ -----
@@ -1624,55 +1741,298 @@ else
     exit 2
   fi
 fi
-
 UPDEOF
 
 write_script "$INSTALL_DIR/scripts/snapshot.sh" 755 <<'EOS'
 #!/usr/bin/env bash
+# ------------------------------------------------------------
+# snapshot.sh  —  Crée un snapshot (archive .tar.gz) de TOUTE
+# la stack CloudCLI (config, sessions Claude/Codex, projets,
+# certificats Caddy, base SQLite CloudCLI).
+#
+# Usage :  ./scripts/snapshot.sh [nom_du_snapshot]
+# Sans argument : nom automatique "snapshot-YYYYMMDD-HHMMSS.tar.gz"
+# ------------------------------------------------------------
 set -euo pipefail
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-BD="$(pwd)/backups";mkdir -p "$BD";NAME="${1:-snapshot-$(date +%Y%m%d-%H%M%S)}";A="$BD/${NAME}.tar.gz"
-echo "📸 Snapshot: $A";TMP="$(mktemp -d)";trap 'rm -rf "$TMP"' EXIT
-VOLS=(cloudcli-data claude-data codex-data codeserver-data codeserver-config projects caddy-data caddy-config)
-PREF="$(docker compose config --format json 2>/dev/null|grep -o '"Name":"[^"]*_cloudcli-data"'|head -n1|sed 's/.*"Name":"//;s/_cloudcli-data.*//')"
-[ -n "$PREF" ] && for i in "${!VOLS[@]}";do VOLS[$i]="${PREF}_${VOLS[$i]}";done
+SCRIPT_DIR="$(pwd)"
+BACKUP_DIR="${SCRIPT_DIR}/backups"
+mkdir -p "${BACKUP_DIR}"
+
+NAME="${1:-snapshot-$(date +%Y%m%d-%H%M%S)}"
+ARCHIVE="${BACKUP_DIR}/${NAME}.tar.gz"
+
+echo "📸 Création du snapshot : ${ARCHIVE}"
+echo
+
+# 1) S'assurer que les conteneurs sont cohérents (flush des DB SQLite)
+docker compose exec -T cloudcli bash -c 'pgrep -f cloudcli >/dev/null' 2>/dev/null || true
+
+# 2) Exporter chaque volume Docker dans un tar temporaire,
+#    puis sauvegarder aussi les bind mounts éventuels.
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# Liste des volumes à sauvegarder (doit correspondre à docker-compose.yml)
+VOLUMES=(
+  multi-agents_cloudcli-data
+  multi-agents_claude-data
+  multi-agents_codex-data
+  multi-agents_codeserver-data
+  multi-agents_codeserver-config
+  multi-agents_projects
+  multi-agents_caddy-data
+  multi-agents_caddy-config
+)
+
+# Si le stack a été lancé depuis un autre nom de dossier, détecte
+# dynamiquement le préfixe des volumes via docker compose.
+VOLUME_NAME="$(docker compose config --format json | jq -r '.volumes["cloudcli-data"].name // empty')"
+PREFIX="${VOLUME_NAME%_cloudcli-data}"
+if [ -n "$PREFIX" ]; then
+  for i in "${!VOLUMES[@]}"; do
+    VOLUMES[$i]="${PREFIX}_${VOLUMES[$i]#multi-agents_}"
+  done
+fi
+
 mkdir -p "$TMP/volumes"
-for V in "${VOLS[@]}";do echo "  • export $V";docker run --rm -v "$V:/source:ro" -v "$TMP/volumes:/backup" alpine sh -c "cd /source&&tar czf /backup/${V}.tar.gz .";done
-mkdir -p "$TMP/config";cp docker-compose.yml Caddyfile "$TMP/config/" 2>/dev/null||true;[ -f .env ]&&cp .env "$TMP/config/.env";cp -r cloudcli "$TMP/config/cloudcli" 2>/dev/null||true
-{ echo "snapshot_date: $(date -Iseconds)";echo "hostname: $(hostname)";docker compose images;} > "$TMP/MANIFEST.txt"
-tar czf "$A" -C "$TMP" .;echo "✅ $A ($(du -h "$A"|cut -f1))"
+for V in "${VOLUMES[@]}"; do
+  echo "  • export volume $V ..."
+  docker run --rm \
+    -v "$V:/source:ro" \
+    -v "$TMP/volumes:/backup" \
+    alpine \
+    sh -c "cd /source && tar czf /backup/${V}.tar.gz ."
+done
+
+# 3) Sauvegarder aussi les fichiers de config du host (Caddyfile, .env, etc.)
+mkdir -p "$TMP/config"
+cp docker-compose.yml Caddyfile .env "$TMP/config/" 2>/dev/null || true
+[ -f .env ] && cp .env "$TMP/config/.env" || true
+cp -r cloudcli "$TMP/config/cloudcli" 2>/dev/null || true
+
+# Métadonnée : date + versions des images
+{
+  echo "snapshot_date: $(date -Iseconds)"
+  echo "hostname: $(hostname)"
+  echo "--- docker compose images ---"
+  docker compose images
+} > "$TMP/MANIFEST.txt"
+
+# 4) Assembler l'archive finale
+tar czf "${ARCHIVE}" -C "$TMP" .
+
+# 5) Résumé
+SIZE=$(du -h "${ARCHIVE}" | cut -f1)
+echo
+echo "✅ Snapshot créé : ${ARCHIVE}  (${SIZE})"
+echo
+echo "   Pour restaurer : ./scripts/restore.sh ${NAME}"
+echo
+echo "📂 Snapshots existants :"
+ls -lh "${BACKUP_DIR}"/*.tar.gz 2>/dev/null | tail -n 10
 EOS
 
 write_script "$INSTALL_DIR/scripts/restore.sh" 755 <<'EOS'
 #!/usr/bin/env bash
-set -euo pipefail;cd "$(dirname "${BASH_SOURCE[0]}")/.."
-[ -z "${1:-}" ]&&{ echo "Usage: $0 <nom>";ls -1 backups/*.tar.gz 2>/dev/null|xargs -n1 basename|sed 's/\.tar\.gz$//';exit 1;}
-I="$1";[ -f "$I" ]&&A="$I"||[ -f "backups/$I" ]&&A="backups/$I"||[ -f "backups/${I}.tar.gz" ]&&A="backups/${I}.tar.gz"||{ echo "Introuvable: $I";exit 1;}
-read -p "⚠ REMPLACE l'état actuel. Taper OUI : " C;[ "$C" != "OUI" ]&&{ echo "Annulé.";exit 0;}
-TMP="$(mktemp -d)";trap 'rm -rf "$TMP"' EXIT;echo "📦 Extraction...";tar xzf "$A" -C "$TMP";echo "🛑 Arrêt...";docker compose down
-PREF="$(docker compose config --format json 2>/dev/null|grep -o '"Name":"[^"]*_cloudcli-data"'|head -n1|sed 's/.*"Name":"//;s/_cloudcli-data.*//')";[ -z "$PREF" ]&&PREF="multi-agents"
-for V in cloudcli-data claude-data codex-data codeserver-data codeserver-config projects caddy-data caddy-config;do docker volume rm "${PREF}_$V" 2>/dev/null||true;done
-echo "♻ Import...";for V in cloudcli-data claude-data codex-data codeserver-data codeserver-config projects caddy-data caddy-config;do
-  F="$TMP/volumes/${PREF}_$V.tar.gz";[ ! -f "$F" ]&&F="$TMP/volumes/multi-agents_$V.tar.gz";[ ! -f "$F" ]&&{ echo "⚠ $V absent";continue;}
-  docker volume create "${PREF}_$V">/dev/null;docker run --rm -v "${PREF}_$V:/target" -v "$TMP/volumes:/backup:ro" alpine sh -c "cd /target&&tar xzf /backup/$(basename "$F")"
+# ------------------------------------------------------------
+# restore.sh  —  Restaure un snapshot créé par snapshot.sh.
+# Arrête les conteneurs, efface les volumes courants, réimporte
+# les données de l'archive puis redémarre.
+#
+# Usage :  ./scripts/restore.sh <nom-du-snapshot>
+#   (on peut passer le nom sans .tar.gz, sans le chemin backups/)
+# ------------------------------------------------------------
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(pwd)"
+BACKUP_DIR="${SCRIPT_DIR}/backups"
+
+if [ -z "${1:-}" ]; then
+  echo "❌ Usage : $0 <nom-du-snapshot>"
+  echo "Snapshots disponibles :"
+  ls -1 "${BACKUP_DIR}"/*.tar.gz 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.tar\.gz$//'
+  exit 1
+fi
+
+# Accepte "mon-snap", "mon-snap.tar.gz", ou "./backups/mon-snap.tar.gz"
+INPUT="$1"
+if [ -f "$INPUT" ]; then
+  ARCHIVE="$INPUT"
+elif [ -f "${BACKUP_DIR}/${INPUT}" ]; then
+  ARCHIVE="${BACKUP_DIR}/${INPUT}"
+elif [ -f "${BACKUP_DIR}/${INPUT}.tar.gz" ]; then
+  ARCHIVE="${BACKUP_DIR}/${INPUT}.tar.gz"
+else
+  echo "❌ Snapshot introuvable : $INPUT"
+  exit 1
+fi
+
+echo "⚠️  ATTENTION : la restauration REMPLACE toutes les données"
+echo "   actuelles (projets, sessions, config) par celles du snapshot."
+echo
+read -p "Continuer ? [tapez OUI en majuscules] : " CONFIRM
+if [ "$CONFIRM" != "OUI" ]; then
+  echo "Annulé."
+  exit 0
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+echo "📦 Extraction de l'archive..."
+tar xzf "${ARCHIVE}" -C "$TMP"
+
+echo "🛑 Arrêt de la stack..."
+docker compose down
+
+# Détection du préfixe des volumes
+VOLUME_NAME="$(docker compose config --format json | jq -r '.volumes["cloudcli-data"].name // empty')"
+PREFIX="${VOLUME_NAME%_cloudcli-data}"
+if [ -z "$PREFIX" ]; then
+  echo "⚠️  Aucun projet docker compose détecté, on suppose 'multi-agents'"
+  PREFIX="multi-agents"
+fi
+
+echo "🗑️  Suppression des volumes existants..."
+VOLUMES=(
+  "${PREFIX}_cloudcli-data"
+  "${PREFIX}_claude-data"
+  "${PREFIX}_codex-data"
+  "${PREFIX}_codeserver-data"
+  "${PREFIX}_codeserver-config"
+  "${PREFIX}_projects"
+  "${PREFIX}_caddy-data"
+  "${PREFIX}_caddy-config"
+)
+for V in "${VOLUMES[@]}"; do
+  docker volume rm "$V" 2>/dev/null || true
 done
-echo "▶ Redémarrage...";docker compose up -d --build;echo "✅ Restauré."
+
+echo "♻️  Recréation des volumes vides + import..."
+mkdir -p "$TMP/volumes"
+for V in "${VOLUMES[@]}"; do
+  ARCHIVE_VOL="$TMP/volumes/${V}.tar.gz"
+  if [ ! -f "$ARCHIVE_VOL" ]; then
+    echo "  ⚠️  Volume $V absent du snapshot, ignoré."
+    continue
+  fi
+  echo "  • import volume $V ..."
+  docker volume create "$V" >/dev/null
+  docker run --rm \
+    -v "$V:/target" \
+    -v "$TMP/volumes:/backup:ro" \
+    alpine \
+    sh -c "cd /target && tar xzf /backup/${V}.tar.gz"
+done
+
+echo "▶️  Redémarrage..."
+docker compose up -d --build
+
+echo
+echo "✅ Restauration terminée."
+echo "   Vérifie avec : docker compose ps && docker compose logs -f cloudcli"
 EOS
 
 write_script "$INSTALL_DIR/scripts/factory-reset.sh" 755 <<'EOS'
-#!/usr/bin/env bash;set -euo pipefail;cd "$(dirname "${BASH_SOURCE[0]}")/.."
-read -p "⚠ TOUT SUPPRIMER ? Taper 'SUPPRIMER TOUT' : " C;[ "$C" != "SUPPRIMER TOUT" ]&&{ echo "Annulé.";exit 0;}
-docker compose down -v;echo "✅ Reset. Relance: docker compose up -d --build"
+#!/usr/bin/env bash
+# ------------------------------------------------------------
+# factory-reset.sh  —  Remet la stack à ZÉRO (supprime tous les
+# volumes : projets, sessions, comptes CloudCLI, config).
+# Les images Docker ne sont pas supprimées.
+#
+# Usage :  ./scripts/factory-reset.sh
+# ------------------------------------------------------------
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+echo "⚠️  ATTENTION : CE SCRIPT SUPPRIME DÉFINITIVEMENT :"
+echo "   • TOUS les projets dans le workspace"
+echo "   • TOUTES les sessions Claude Code / Codex"
+echo "   • Le compte/mot de passe CloudCLI"
+echo "   • Les données Caddy (certificats)"
+echo
+echo "   (Les images Docker sont conservées.)"
+echo
+read -p "Taper 'SUPPRIMER TOUT' pour confirmer : " CONFIRM
+if [ "$CONFIRM" != "SUPPRIMER TOUT" ]; then
+  echo "Annulé."
+  exit 0
+fi
+
+echo "🛑 Arrêt + suppression des conteneurs et volumes..."
+docker compose down -v
+
+echo "🔧 Nettoyage des dossiers bind-mount éventuels..."
+rm -rf ./data 2>/dev/null || true
+
+echo
+echo "✅ Reset effectué. Tu peux relancer avec : docker compose up -d --build"
 EOS
 
 write_script "$INSTALL_DIR/scripts/auto-snapshot.sh" 755 <<'EOS'
-#!/usr/bin/env bash;set -euo pipefail;SD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."&&pwd)";cd "$SD";KEEP="${SNAPSHOT_KEEP:-14}";LF="${SNAPSHOT_LOG:-/var/log/cloudcli-snapshot.log}";mkdir -p backups "$(dirname "$LF")"
-ts(){ date '+%Y-%m-%d %H:%M:%S';};log(){ echo "[$(ts)] $*"|tee -a "$LF";}
-log "📸 Snapshot auto (KEEP=$KEEP)";NAME="auto-$(date +%Y%m%d-%H%M%S)"
-if ./scripts/snapshot.sh "$NAME">>"$LF" 2>&1;then log "✅ backups/${NAME}.tar.gz";else log "❌ ERREUR";exit 1;fi
-mapfile -t OLD < <(ls -1t backups/auto-*.tar.gz 2>/dev/null|tail -n +$((KEEP+1)));((${#OLD[@]}>0))&&{ log "🗑 Suppression ${#OLD[@]} anciens auto";rm -f "${OLD[@]}";}
-DEL=$(find backups -maxdepth 1 -name "snapshot-*.tar.gz" -mtime +30 -print -delete 2>/dev/null|wc -l);((DEL>0))&&log "🗑 $DEL snapshot(s) manuel(s) >30j"
-SIZE=$(du -sh backups|cut -f1);CNT=$(ls -1 backups/*.tar.gz 2>/dev/null|wc -l);log "📂 $CNT archives, $SIZE — terminé"
+#!/usr/bin/env bash
+# ------------------------------------------------------------
+# auto-snapshot.sh  —  Wrapper pour cron/systemd-timer : prend
+# un snapshot automatiquement et ne garde que les N derniers.
+#
+# Par défaut : 14 snapshots auto conservés, 30 jours pour les manuels.
+# Modifiable via la variable d'env SNAPSHOT_KEEP.
+#
+# Installation (fait aussi par install.sh) :
+#   ln -sf /opt/multi-agents/scripts/auto-snapshot.sh /etc/cron.daily/cloudcli-snapshot
+#
+# Ou en ligne crontab explicite (3h00 du matin) :
+#   0 3 * * * /opt/multi-agents/scripts/auto-snapshot.sh >> /var/log/cloudcli-snapshot.log 2>&1
+# ------------------------------------------------------------
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$SCRIPT_DIR"
+
+KEEP="${SNAPSHOT_KEEP:-$(sed -n 's/^SNAPSHOT_KEEP=//p' .env 2>/dev/null | head -n 1)}"
+KEEP="${KEEP:-3}"
+[[ "$KEEP" =~ ^[1-9][0-9]*$ ]] || { echo "SNAPSHOT_KEEP doit être positif." >&2; exit 1; }
+LOG_DIR="${SNAPSHOT_LOG_DIR:-/var/log}"
+LOG_FILE="${LOG_DIR}/cloudcli-snapshot.log"
+mkdir -p "$(dirname "$LOG_FILE")" "$SCRIPT_DIR/backups"
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+log() { echo "[$(ts)] $*" | tee -a "$LOG_FILE"; }
+
+log "📸 Démarrage snapshot automatique (KEEP=$KEEP)"
+
+# Création du snapshot
+NAME="auto-$(date +%Y%m%d-%H%M%S)"
+if ./scripts/snapshot.sh "$NAME" >> "$LOG_FILE" 2>&1; then
+  log "✅ Snapshot créé : backups/${NAME}.tar.gz"
+else
+  log "❌ ERREUR pendant la création du snapshot (voir log ci-dessus)"
+  exit 1
+fi
+
+# Rotation des auto-* : ne garder que les N plus récentes
+mapfile -t OLD_AUTO < <(ls -1t "$SCRIPT_DIR/backups"/auto-*.tar.gz 2>/dev/null | tail -n +$((KEEP+1)))
+if (( ${#OLD_AUTO[@]} > 0 )); then
+  log "🗑️  Rotation : suppression de ${#OLD_AUTO[@]} ancien(s) snapshot(s) auto"
+  rm -f "${OLD_AUTO[@]}"
+fi
+
+# Nettoyer les snapshots manuels > 30 jours
+DELETED_MANUAL=$(find "$SCRIPT_DIR/backups" -maxdepth 1 -name "snapshot-*.tar.gz" -mtime +30 -print -delete 2>/dev/null | wc -l)
+if (( DELETED_MANUAL > 0 )); then
+  log "🗑️  Nettoyage : $DELETED_MANUAL snapshot(s) manuel(s) de +30j supprimé(s)"
+fi
+
+# Résumé
+SIZE=$(du -sh "$SCRIPT_DIR/backups" | cut -f1)
+COUNT=$(ls -1 "$SCRIPT_DIR/backups"/*.tar.gz 2>/dev/null | wc -l)
+log "📂 backups/ : $COUNT archives, taille totale $SIZE"
+log "🏁 Terminé"
+echo                                                     # séparateur dans le log
 EOS
 
 write_script "$INSTALL_DIR/scripts/status.sh" 755 <<'EOS'
@@ -1744,7 +2104,6 @@ IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo "🔗 URLs (depuis un navigateur) :"
 echo "   CloudCLI    : https://${IP:-<IP-de-la-VM>}/"
 echo "   code-server : https://${IP:-<IP-de-la-VM>}/ide/"
-
 EOS
 
 write_script "$INSTALL_DIR/scripts/doctor.sh" 755 <<'EOS'
@@ -1764,6 +2123,17 @@ hdr(){ echo -e "\n${C}═══ $* ═══${NC}"; }
 ok(){  echo -e "  ${G}✔${NC} $*"; }
 warn(){ echo -e "  ${Y}⚠${NC} $*"; }
 bad(){  echo -e "  ${R}✘${NC} $*"; }
+set_state(){
+  touch .vmremoteagent.state
+  if grep -q '^state=' .vmremoteagent.state; then
+    sed -i "s/^state=.*/state=$1/" .vmremoteagent.state
+  else
+    printf 'state=%s\n' "$1" >> .vmremoteagent.state
+  fi
+  if ! grep -q '^version=' .vmremoteagent.state; then
+    printf 'version=%s\n' "$(cat VERSION 2>/dev/null || printf '?')" >> .vmremoteagent.state
+  fi
+}
 
 FIX=0; NONINT=0
 for a in "$@"; do
@@ -1890,7 +2260,8 @@ fi
 # ---------- 8. .env ----------
 hdr "8. Configuration .env"
 if [ -f .env ]; then
-  if grep -qE '^OLLAMA_API_KEY=sk-' .env; then ok "clé Ollama configurée"
+  if grep -q '^ALLOW_NO_API_KEY=1$' .env && ! grep -qE '^OLLAMA_API_KEY=.+' .env; then warn "test sans clé API : inférence IA indisponible"
+  elif grep -qE '^OLLAMA_API_KEY=.+' .env; then ok "clé Ollama configurée"
   else bad "OLLAMA_API_KEY invalide dans .env"; PROBLEMS=$((PROBLEMS+1)); fi
   if grep -qE '^WEBUI_SECRET_KEY=.{16,}' .env; then ok "secret webui présent"
   else warn "WEBUI_SECRET_KEY absent ou trop court"; fi
@@ -1925,8 +2296,7 @@ done
 echo
 if [ "$PROBLEMS" -eq 0 ]; then
   echo -e "${G}✅ Tout semble opérationnel.${NC}"
-  echo "state=healthy" > .vmremoteagent.state
-  grep -qE '^version=' .vmremoteagent.state 2>/dev/null || echo "version=?" >> .vmremoteagent.state
+  set_state healthy
   exit 0
 fi
 
@@ -1981,12 +2351,9 @@ if [ "$FIX" -eq 1 ]; then
 
   # Snapshot de l'état
   if curl -kfsS --max-time 3 https://127.0.0.1/ -o /dev/null 2>/dev/null; then
-    echo "state=healthy" > .vmremoteagent.state
+    set_state healthy
   else
-    echo "state=starting" > .vmremoteagent.state
-  fi
-  if ! grep -qE '^version=' .vmremoteagent.state 2>/dev/null; then
-    echo "version=?" >> .vmremoteagent.state
+    set_state starting
   fi
   echo ""
   echo -e "${G}✅ Fin de la réparation.${NC}"
@@ -1994,11 +2361,11 @@ if [ "$FIX" -eq 1 ]; then
   echo "   puis relancez : ./scripts/doctor.sh"
   echo "   Pour les logs en direct : docker compose logs -f cloudcli"
 fi
-
 EOS
 
 ok "Fichiers de config écrits"
 fi # SKIP_WRITE
+cp -f -- "${BASH_SOURCE[0]}" "$INSTALL_DIR/setup.sh" 2>/dev/null || true
 
 progress 75 "Configuration des sauvegardes automatiques..."
 
@@ -2037,26 +2404,15 @@ case "$ACTION" in
     ;;
 esac
 
-# Limiter la mémoire utilisée pendant le build Docker.
-# Sur ARM64 / faible RAM, BuildKit parallélise plusieurs couches et
-# consomme plus de RAM : on utilise le builder classique et on limite
-# le parallélisme à 1 pour éviter l'OOM (exit 137).
+# BuildKit requis par COPY --chmod. Npm est séquentiel et sa heap bornée.
+if [ "${REUSE_IMAGE:-0}" = "1" ]; then
+  docker image inspect multi-agents-cloudcli:latest >/dev/null 2>&1 || die "REUSE_IMAGE=1 mais image absente."
+  BUILD_ACTION=""
+  ok "Image existante réutilisée (REUSE_IMAGE=1)."
+fi
 export DOCKER_BUILDKIT=1
 export BUILDKIT_PROGRESS=plain
-export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-}"
-ARCH_NOW="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-case "$ARCH_NOW" in aarch64|arm64|armv7l)
-  _AVAIL_RAM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
-  _AVAIL_RAM_MB=$((_AVAIL_RAM_KB / 1024))
-  if [ "$_AVAIL_RAM_MB" -lt 2500 ]; then
-    export DOCKER_BUILDKIT=0
-    export COMPOSE_PARALLEL_LIMIT=1
-    warn "ARM64 détecté avec ${_AVAIL_RAM_MB} Mo de RAM : BuildKit désactivé + parallélisme=1 pour éviter l'OOM."
-    warn "Le build peut durer 10-25 minutes (npm installe claude-code, codex et cloudcli séquentiellement)."
-    warn "Pour aller plus vite, augmentez la RAM à 4 Go."
-  fi
-  ;;
-esac
+export COMPOSE_PARALLEL_LIMIT=1
 
 if [ "${NO_BUILD:-}" = "1" ]; then
   warn "NO_BUILD=1, démarrage ignoré. Lancez : cd $INSTALL_DIR && docker compose up -d --build"
@@ -2091,7 +2447,7 @@ else
     UP1=$(count_container_up '^cloudcli$')
     UP2=$(count_container_up '^caddy$')
     if [ "$UP1" -eq 1 ] && [ "$UP2" -eq 1 ]; then
-      if curl -kfsS --max-time 3 https://127.0.0.1/ -o /dev/null 2>/dev/null; then
+      if curl -kfsS --max-time 3 https://127.0.0.1/ -o /dev/null 2>/dev/null && curl -kfsS --max-time 3 https://127.0.0.1:3001/ -o /dev/null 2>/dev/null && curl -kfsS --max-time 3 https://127.0.0.1/ide/ -o /dev/null 2>/dev/null; then
         HEALTH_OK=1; break
       fi
     fi
@@ -2103,7 +2459,7 @@ else
     FINAL_STATE="healthy"
   else
     warn "Healthcheck: conteneurs Up mais le dashboard ne répond pas encore (attendez 30-60s supplémentaires, premier lancement de code-server/CloudCLI)."
-    FINAL_STATE="starting"
+    FINAL_STATE="failed"
   fi
   fi  # close failed guard
 fi  # close NO_BUILD else
