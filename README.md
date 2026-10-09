@@ -10,6 +10,9 @@
 > les commandes de suppression de sa VM sont documentés dans
 > [GUIDE-DEBIAN-VIERGE.md](./GUIDE-DEBIAN-VIERGE.md#test-local-debian-avec-2-go-de-ram).
 
+> Configuration : copier [.env.example](./.env.example) vers `.env`, puis
+> renseigner la clé Ollama, le mot de passe IDE et l'adresse de la VM.
+
 [CloudCLI](https://github.com/siteboon/claudecodeui) · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [Codex CLI](https://github.com/openai/codex) · [code-server](https://github.com/coder/code-server) · [Caddy](https://caddyserver.com) · [Ollama Cloud](https://ollama.com)
 
 [![License: Propriétaire](https://img.shields.io/badge/License-Propri%C3%A9taire-red.svg)]()

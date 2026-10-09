@@ -38,7 +38,13 @@ Cela permet de tester l'interface, l'authentification, l'IDE et la persistance ;
 une réponse IA nécessite une vraie clé `OLLAMA_API_KEY`. Aucun modèle n'est
 téléchargé sur la VM : l'inférence utilise Ollama Cloud.
 
-Le fichier `.env` à la racine est prêt à remplir. Après avoir renseigné
+Copier [.env.example](./.env.example) vers `.env` à la racine :
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Remplir la clé Ollama et remplacer le mot de passe IDE. Après avoir renseigné
 `OLLAMA_API_KEY`, appliquer sa configuration à la VM locale sans refaire le build :
 
 ```powershell
