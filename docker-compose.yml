@@ -1,21 +1,41 @@
+name: multi-agents
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "5m"
+    max-file: "2"
+
 services:
   cloudcli:
     build: ./cloudcli
     image: multi-agents-cloudcli:latest
     container_name: cloudcli
     restart: unless-stopped
+    mem_limit: ${CLOUDCLI_MEMORY_LIMIT:-1400m}
+    memswap_limit: ${CLOUDCLI_SWAP_LIMIT:-2g}
     environment:
-      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
-      - SERVER_PORT=3001
-      - HOST=0.0.0.0
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-5.3-flash}
+      CODE_SERVER_PASSWORD: ${CODE_SERVER_PASSWORD:?Définissez le mot de passe IDE dans .env}
+      SERVER_PORT: "3001"
+      HOST: 0.0.0.0
+      NODE_OPTIONS: --max-old-space-size=384
     volumes:
+      - ./cloudcli/entrypoint.sh:/home/agent/entrypoint.sh:ro
       - cloudcli-data:/home/agent/.cloudcli
       - claude-data:/home/agent/.claude
       - codex-data:/home/agent/.codex
       - codeserver-data:/home/agent/.local/share/code-server
       - codeserver-config:/home/agent/.config/code-server
       - projects:/home/agent/workspace
-    shm_size: "2g"
+    shm_size: "64m"
+    logging: *logging
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 3 http://127.0.0.1:3001/ >/dev/null && curl -fsS --max-time 3 http://127.0.0.1:8080/healthz >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
     networks: [agent-net]
     expose: ["3001", "8080"]
 
@@ -23,10 +43,14 @@ services:
     image: caddy:2-alpine
     container_name: caddy
     restart: unless-stopped
+    mem_limit: 128m
+    logging: *logging
+    environment:
+      HOSTNAME_PUBLIQUE: ${HOSTNAME_PUBLIQUE:-localhost}
     ports:
-      - "80:80"
-      - "443:443"
-      - "3001:3001"
+      - "${BIND_ADDRESS:-0.0.0.0}:80:80"
+      - "${BIND_ADDRESS:-0.0.0.0}:443:443"
+      - "${BIND_ADDRESS:-0.0.0.0}:3001:3001"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./dashboard:/srv/dashboard:ro
@@ -44,7 +68,6 @@ volumes:
   projects:
   caddy-data:
   caddy-config:
-
 networks:
   agent-net:
     driver: bridge

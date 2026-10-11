@@ -52,7 +52,8 @@ echo "🛑 Arrêt de la stack..."
 docker compose down
 
 # Détection du préfixe des volumes
-PREFIX="$(docker compose config --format json | grep -o '"Name":"[^"]*_cloudcli-data"' | head -n1 | sed 's/.*"Name":"//;s/_cloudcli-data.*//')"
+VOLUME_NAME="$(docker compose config --format json | jq -r '.volumes["cloudcli-data"].name // empty')"
+PREFIX="${VOLUME_NAME%_cloudcli-data}"
 if [ -z "$PREFIX" ]; then
   echo "⚠️  Aucun projet docker compose détecté, on suppose 'multi-agents'"
   PREFIX="multi-agents"

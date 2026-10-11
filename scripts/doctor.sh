@@ -14,6 +14,17 @@ hdr(){ echo -e "\n${C}═══ $* ═══${NC}"; }
 ok(){  echo -e "  ${G}✔${NC} $*"; }
 warn(){ echo -e "  ${Y}⚠${NC} $*"; }
 bad(){  echo -e "  ${R}✘${NC} $*"; }
+set_state(){
+  touch .vmremoteagent.state
+  if grep -q '^state=' .vmremoteagent.state; then
+    sed -i "s/^state=.*/state=$1/" .vmremoteagent.state
+  else
+    printf 'state=%s\n' "$1" >> .vmremoteagent.state
+  fi
+  if ! grep -q '^version=' .vmremoteagent.state; then
+    printf 'version=%s\n' "$(cat VERSION 2>/dev/null || printf '?')" >> .vmremoteagent.state
+  fi
+}
 
 FIX=0; NONINT=0
 for a in "$@"; do
@@ -140,7 +151,8 @@ fi
 # ---------- 8. .env ----------
 hdr "8. Configuration .env"
 if [ -f .env ]; then
-  if grep -qE '^OLLAMA_API_KEY=sk-' .env; then ok "clé Ollama configurée"
+  if grep -q '^ALLOW_NO_API_KEY=1$' .env && ! grep -qE '^OLLAMA_API_KEY=.+' .env; then warn "test sans clé API : inférence IA indisponible"
+  elif grep -qE '^OLLAMA_API_KEY=.+' .env; then ok "clé Ollama configurée"
   else bad "OLLAMA_API_KEY invalide dans .env"; PROBLEMS=$((PROBLEMS+1)); fi
   if grep -qE '^WEBUI_SECRET_KEY=.{16,}' .env; then ok "secret webui présent"
   else warn "WEBUI_SECRET_KEY absent ou trop court"; fi
@@ -175,8 +187,7 @@ done
 echo
 if [ "$PROBLEMS" -eq 0 ]; then
   echo -e "${G}✅ Tout semble opérationnel.${NC}"
-  echo "state=healthy" > .vmremoteagent.state
-  grep -qE '^version=' .vmremoteagent.state 2>/dev/null || echo "version=?" >> .vmremoteagent.state
+  set_state healthy
   exit 0
 fi
 
@@ -231,12 +242,9 @@ if [ "$FIX" -eq 1 ]; then
 
   # Snapshot de l'état
   if curl -kfsS --max-time 3 https://127.0.0.1/ -o /dev/null 2>/dev/null; then
-    echo "state=healthy" > .vmremoteagent.state
+    set_state healthy
   else
-    echo "state=starting" > .vmremoteagent.state
-  fi
-  if ! grep -qE '^version=' .vmremoteagent.state 2>/dev/null; then
-    echo "version=?" >> .vmremoteagent.state
+    set_state starting
   fi
   echo ""
   echo -e "${G}✅ Fin de la réparation.${NC}"
