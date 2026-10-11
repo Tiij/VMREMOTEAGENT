@@ -21,7 +21,10 @@ echo "📸 Création du snapshot : ${ARCHIVE}"
 echo
 
 # 1) S'assurer que les conteneurs sont cohérents (flush des DB SQLite)
-docker compose exec -T cloudcli bash -c 'pgrep -f cloudcli >/dev/null' 2>/dev/null || true
+# </dev/null : docker compose exec consomme le stdin hérité ; depuis un
+# setup.sh exécuté via pipe (curl | bash), il avalait le reste du script
+# source et l'installation s'arrêtait en silence après le snapshot.
+docker compose exec -T cloudcli bash -c 'pgrep -f cloudcli >/dev/null' </dev/null 2>/dev/null || true
 
 # 2) Exporter chaque volume Docker dans un tar temporaire,
 #    puis sauvegarder aussi les bind mounts éventuels.

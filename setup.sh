@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ==================== Version de cette release ====================
-INSTALLER_VERSION="1.4.7"
+INSTALLER_VERSION="1.4.8"
 STATE_FILE=".vmremoteagent.state"
 META_FILE="MANIFEST.txt"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
@@ -52,6 +52,8 @@ cleanup_lock() {
   # Ne pas supprimer l'inode verrouillé : un concurrent pourrait verrouiller
   # un autre inode portant le même nom. Le noyau libère flock à la sortie.
   rm -f "$PROGRESS_FILE" 2>/dev/null || true
+  # Fermer le fd de saisie utilisateur ouvert au top-level
+  if [ "${USER_INPUT_FD:-}" = "7" ]; then exec 7<&- 2>/dev/null || true; fi
   # Restaurer le terminal si whiptail l'a cassé
   [ -t 1 ] && stty sane 2>/dev/null || true
 }
@@ -130,6 +132,25 @@ if [ "${NONINTERACTIVE:-0}" != "1" ] && [ ! -t 0 ] \
 fi
 export NONINTERACTIVE INTERACTIVE_OUT
 
+# Ouvrir le fd de saisie utilisateur ICI, une seule fois, au top-level —
+# JAMAIS dans les $( ... ) du wizard : un exec de redirection raté dans une
+# commande substituée fait mourir tout l'installateur silencieusement
+# (le code de sortie remonte à l'affectation et set -e termine le script).
+# En l'absence totale de TTY (CI, cron, script détaché), on repasse en
+# non-interactif comme le ferait l'ancien code.
+USER_INPUT_FD=""
+if [ -t 0 ]; then
+  USER_INPUT_FD=0
+elif [ -c /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  if exec 7</dev/tty 2>/dev/null; then
+    USER_INPUT_FD=7
+  else
+    USER_INPUT_FD=0; NONINTERACTIVE=1
+  fi
+else
+  USER_INPUT_FD=0; NONINTERACTIVE=1
+fi
+
 USE_TUI=0
 if [ "$NOTUI" != "1" ] && [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ] && [ -t 1 ]; then
   if command -v whiptail >/dev/null 2>&1; then
@@ -170,10 +191,13 @@ msgbox(){
   if [ "$USE_TUI" -eq 1 ]; then
     whiptail --title "$title" --msgbox "$msg" 15 70 3>&1 1>&2 2>&3
   else
-    echo ""
-    echo -e "${CYAN}─── $title ───${NC}"
-    echo -e "$msg" | sed 's/\\n/\n/g' | fold -s -w 72 | sed 's/^/  /'
-    echo ""
+    # Affichage sur stderr : en mode capture $(...) du wizard, stdout sert
+    # à remonter le résultat ; les prompts qui partaient sur stdout étaient
+    # avalés dans la variable (utilisateur aveugle + variables polluées).
+    echo "" >&$INTERACTIVE_OUT
+    echo -e "${CYAN}─── $title ───${NC}" >&$INTERACTIVE_OUT
+    echo -e "$msg" | sed 's/\\n/\n/g' | fold -s -w 72 | sed 's/^/  /' >&$INTERACTIVE_OUT
+    echo "" >&$INTERACTIVE_OUT
   fi
 }
 
@@ -220,12 +244,12 @@ yesno(){
     whiptail --title "$title" --yesno "$msg" 15 70 --defaultno 3>&1 1>&2 2>&3
     return $?
   else
-    echo ""
-    echo -e "${BOLD}$title${NC}"
-    echo -e "$msg" | sed 's/\\n/\n/g' | fold -s -w 72
+    echo "" >&$INTERACTIVE_OUT
+    echo -e "${BOLD}$title${NC}" >&$INTERACTIVE_OUT
+    echo -e "$msg" | sed 's/\\n/\n/g' | fold -s -w 72 >&$INTERACTIVE_OUT
     local deflabel="[O/n]"
     [ "$default" = "1" ] && deflabel="[o/N]"
-    echo -n "  $deflabel "
+    echo -n "  $deflabel " >&$INTERACTIVE_OUT
     local R
     prompt_read R
     case "$R" in n|N|no|non) return 1 ;; *) return 0 ;; esac
@@ -243,10 +267,10 @@ inputbox(){
   if [ "$USE_TUI" -eq 1 ]; then
     res=$(whiptail --title "$title" --inputbox "$msg" 12 70 "$default" 3>&1 1>&2 2>&3)
   else
-    echo ""
-    echo -e "${BOLD}$title${NC}"
-    echo -e "$msg" | fold -s -w 72 | sed 's/^/  /'
-    echo -n "  [défaut: $default] : "
+    echo "" >&$INTERACTIVE_OUT
+    echo -e "${BOLD}$title${NC}" >&$INTERACTIVE_OUT
+    echo -e "$msg" | fold -s -w 72 | sed 's/^/  /' >&$INTERACTIVE_OUT
+    echo -n "  [défaut: $default] : " >&$INTERACTIVE_OUT
     prompt_read res
     [ -z "$res" ] && res="$default"
   fi
@@ -263,12 +287,12 @@ passwordbox(){
   if [ "$USE_TUI" -eq 1 ]; then
     res=$(whiptail --title "$title" --passwordbox "$msg" 12 70 3>&1 1>&2 2>&3)
   else
-    echo ""
-    echo -e "${BOLD}$title${NC}"
-    echo -e "$msg" | fold -s -w 72 | sed 's/^/  /'
-    echo -n "  > "
+    echo "" >&$INTERACTIVE_OUT
+    echo -e "${BOLD}$title${NC}" >&$INTERACTIVE_OUT
+    echo -e "$msg" | fold -s -w 72 | sed 's/^/  /' >&$INTERACTIVE_OUT
+    echo -n "  > " >&$INTERACTIVE_OUT
     prompt_read_silent res
-    echo ""
+    echo "" >&$INTERACTIVE_OUT
   fi
   echo "$res"
 }
@@ -283,20 +307,34 @@ menu(){
   if [ "$USE_TUI" -eq 1 ]; then
     res=$(whiptail --title "$title" --menu "$prompt" 20 70 12 "$@" 3>&1 1>&2 2>&3)
   else
-    echo ""
-    echo -e "${BOLD}$title${NC}"
-    echo -e "$prompt" | fold -s -w 72 | sed 's/^/  /'
+    echo "" >&$INTERACTIVE_OUT
+    echo -e "${BOLD}$title${NC}" >&$INTERACTIVE_OUT
+    echo -e "$prompt" | fold -s -w 72 | sed 's/^/  /' >&$INTERACTIVE_OUT
     local i=1 items=()
     while [ $# -gt 0 ]; do
-      echo -e "  ${BOLD}[$i]${NC} $1 — $2"
+      echo -e "  ${BOLD}[$i]${NC} $1 — $2" >&$INTERACTIVE_OUT
       items+=("$1"); shift 2; i=$((i+1))
     done
-    echo -n "  Choix (1-${#items[@]}, défaut=1) : "
+    echo -n "  Choix (1-${#items[@]}, défaut=1) : " >&$INTERACTIVE_OUT
     local R; prompt_read R
-    if [ -z "$R" ] || [ "$R" -lt 1 ] 2>/dev/null || [ "$R" -gt "${#items[@]}" ] 2>/dev/null; then
-      R=1
+    # Accepte le nom de l'option en toutes lettres (ex: « repair »), un
+    # numéro, ou une saisie vide (défaut). L'ancien test `[ "$R" -lt 1 ]`
+    # renvoyait "integer expression expected" sur une saisie texte, puis
+    # $((R-1)) sur la même saisie évaluait « repair-1 » → index négatif →
+    # le menu retournait SILENCIEUSEMENT LA DERNIÈRE OPTION (status).
+    local found="" low="${R,,}"
+    for it in "${items[@]}"; do
+      if [ "${it,,}" = "$low" ]; then found="$it"; break; fi
+    done
+    if [ -n "$found" ]; then
+      res="$found"
+    else
+      case "$R" in ''|*[!0-9]*) R=1 ;; esac
+      if [ "$R" -lt 1 ] 2>/dev/null || [ "$R" -gt "${#items[@]}" ] 2>/dev/null; then
+        R=1
+      fi
+      res="${items[$((R-1))]}"
     fi
-    res="${items[$((R-1))]}"
   fi
   echo "$res"
 }
@@ -1777,7 +1815,10 @@ echo "📸 Création du snapshot : ${ARCHIVE}"
 echo
 
 # 1) S'assurer que les conteneurs sont cohérents (flush des DB SQLite)
-docker compose exec -T cloudcli bash -c 'pgrep -f cloudcli >/dev/null' 2>/dev/null || true
+# </dev/null : docker compose exec consomme le stdin hérité ; lancé depuis
+# `setup.sh exécuté via pipe (curl | bash)`, il avalait le reste du script
+# source et l'installation s'arrêtait en silence après le snapshot.
+docker compose exec -T cloudcli bash -c 'pgrep -f cloudcli >/dev/null' </dev/null 2>/dev/null || true
 
 # 2) Exporter chaque volume Docker dans un tar temporaire,
 #    puis sauvegarder aussi les bind mounts éventuels.
@@ -2379,7 +2420,14 @@ EOS
 
 ok "Fichiers de config écrits"
 fi # SKIP_WRITE
-cp -f -- "${BASH_SOURCE[0]}" "$INSTALL_DIR/setup.sh" 2>/dev/null || true
+# Recopie de l'installateur dans le dossier d'installation. En exécution
+# depuis stdin (curl … | bash) il n'y a AUCUN fichier source : BASH_SOURCE
+# est un tableau vide et ${BASH_SOURCE[0]} nue mourait sous set -u
+# ("bash: line NNN: BASH_SOURCE[0]: unbound variable") en tuant tout
+# l'installateur juste après l'écriture des fichiers de config.
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  cp -f -- "${BASH_SOURCE[0]}" "$INSTALL_DIR/setup.sh" 2>/dev/null || true
+fi
 
 progress 75 "Configuration des sauvegardes automatiques..."
 

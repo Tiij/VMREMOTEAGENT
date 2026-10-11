@@ -6,6 +6,49 @@ Le versionning suit [SemVer](https://semver.org/lang/fr/) : `MAJEUR.MINEUR.PATCH
 
 ---
 
+## [1.4.8] — 2026-10-11
+
+### Corrigé
+- **Installation tuée en silence via `curl … | bash` après le snapshot** :
+  `scripts/snapshot.sh` lançait `docker compose exec -T cloudcli …` sans
+  rediriger son entrée. Sous un installateur exécuté depuis une pipe
+  (`curl -fsSL … | bash`), Docker consommait le stdin hérité — c'est-à-dire
+  **la suite du script source** — et bash atteignait une fin de fichier
+  fictive au beau milieu de l'installation (arrêt propre, code 0, sans
+  aucune erreur, juste après « Snapshot de sauvegarde créé »). Désormais
+  `</dev/null` protège le source du script.
+- **Crash `BASH_SOURCE[0]: unbound variable` (ligne 2368)** au recopiage de
+  `setup.sh` dans `/opt/multi-agents/setup.sh` : en exécution pipée il n'y a
+  aucun fichier source, `BASH_SOURCE` est vide et l'expansion nue mourait
+  sous `set -u` juste après « Fichiers de config écrits », en plein milieu
+  d'une réparation. (C'était exactement le crash constaté sur VMRA-007.)
+- **Wizard texte aveugle + variables polluées** : `inputbox`, `passwordbox`,
+  `menu`, `yesno` et `msgbox` en mode texte affichaient leurs questions sur
+  **stdout**, que le wizard capture (`HOST=$(inputbox …)`) : les invites
+  étaient donc invisibles et **les variables récupéraient tout le texte du
+  prompt collé à la réponse** (l'utilisateur tapait à l'aveugle, le récap
+  affichait les blocs de prompt à la place des valeurs). Les questions
+  partent maintenant sur stderr (`$INTERACTIVE_OUT`), les variables ne
+  contiennent plus que la réponse saisie.
+- **Menu qui retournait la mauvaise option sur saisie texte** : taper
+  « repair » rendait `[ "$R" -lt 1 ]` en erreur entière, puis `$((R-1))`
+  évaluait une variable inexistante → index -1 → **la 5ème entrée** (« status »)
+  était retournée silencieusement. Le menu accepte désormais le nom de
+  l'option (insensible à la casse), un numéro, ou une saisie vide.
+- **Ouverture du fd de saisie au top-level** : l'ouverture de `/dev/tty`
+  (fd 7) se faisait à l'intérieur des sous-shells `$( … )` du wizard ; un
+  exec raté à cet endroit tue tout le script (exit 1 silencieux via set -e).
+  Le fd est maintenant ouvert une seule fois hors capture, fermé proprement
+  à la sortie (trap), et réutilisé partout.
+
+### Testé
+- VM Debian 12 x86_64 (2 vCPU / 2048 Mo, conteneurs actifs) : réinstallation
+  complète **pipée** (`cat setup.sh | env … bash`) jusqu'à l'écran final,
+  wizard interactif réel via pseudo-TTY (réponses invisibles avant,
+  visibles et propres maintenant), snapshot/restore intacts.
+
+---
+
 ## [1.4.7] — 2026-10-11
 
 ### Corrigé
