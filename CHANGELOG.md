@@ -6,6 +6,26 @@ Le versionning suit [SemVer](https://semver.org/lang/fr/) : `MAJEUR.MINEUR.PATCH
 
 ---
 
+## [1.4.7] — 2026-10-11
+
+### Corrigé
+- **`./scripts/doctor.sh --fix` ne réparait rien sur une installation sans clé API**
+  ("mode sans IA") : la relance de `setup.sh` mourait immédiatement avec
+  `OLLAMA_API_KEY absent`, laissant l'installation cassée. Le drapeau
+  `ALLOW_NO_API_KEY` est désormais relu depuis le `.env` existant avant le
+  contrôle de la clé, et le doctor le transmet à la relance.
+- `setup.sh` écrasait la config permanente à chaque réparation/mise à jour :
+  `ALLOW_NO_API_KEY` et `SNAPSHOT_KEEP` personnalisés retombaient à leurs
+  défauts (0 et 3). Ils sont maintenant préservés comme les autres secrets.
+
+### Testé
+- Validation complète sur VM Debian 12 (2 vCPU / 2048 Mo) : installation,
+  healthcheck, limites mémoire, snapshot/restore, redémarrage, agents
+  Claude et Codex répondant via Ollama Cloud, puis cycle
+  casse → `doctor --fix` → réparation.
+
+---
+
 ## [1.2.0] — 2026-10-02
 
 ### Ajouté

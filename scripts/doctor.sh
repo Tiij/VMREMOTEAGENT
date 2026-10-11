@@ -221,7 +221,11 @@ if [ "$FIX" -eq 1 ]; then
 
   if [ "$NEED_REINSTALL" -eq 1 ] && [ -x ./setup.sh ]; then
     warn "Fichiers ou image Docker manquants → relance de setup.sh en mode repair"
-    FORCE_ACTION=repair NONINTERACTIVE=1 bash ./setup.sh
+    # Préserver la config permanente (mode sans IA) pour la relance
+    ALLOW_NO_API_KEY=$(sed -n 's/^ALLOW_NO_API_KEY=//p' .env 2>/dev/null | head -n 1)
+    SNAPSHOT_KEEP=$(sed -n 's/^SNAPSHOT_KEEP=//p' .env 2>/dev/null | head -n 1)
+    env ALLOW_NO_API_KEY="${ALLOW_NO_API_KEY:-}" SNAPSHOT_KEEP="${SNAPSHOT_KEEP:-}" \
+        FORCE_ACTION=repair NONINTERACTIVE=1 bash ./setup.sh
   elif [ "$NEED_REINSTALL" -eq 1 ] && [ ! -x ./setup.sh ]; then
     bad "setup.sh n'est pas présent dans $(pwd)."
     echo "  Relancez l'installation complète :"

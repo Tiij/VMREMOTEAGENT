@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ==================== Version de cette release ====================
-INSTALLER_VERSION="1.4.6"
+INSTALLER_VERSION="1.4.7"
 STATE_FILE=".vmremoteagent.state"
 META_FILE="MANIFEST.txt"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
@@ -409,6 +409,10 @@ OLLAMA_API_KEY_ENV="${OLLAMA_API_KEY:-}"
 OLLAMA_API_KEY="${OLLAMA_API_KEY:-}"
 if [ -z "${OLLAMA_API_KEY:-}" ] && [ -f "$INSTALL_DIR/.env" ]; then
   OLLAMA_API_KEY=$(sed -n 's/^OLLAMA_API_KEY=//p' "$INSTALL_DIR/.env" | head -n 1)
+fi
+# Config permanente : reprendre ALLOW_NO_API_KEY du .env existant (mode sans IA).
+if [ -z "${ALLOW_NO_API_KEY:-}" ] && [ -f "$INSTALL_DIR/.env" ]; then
+  ALLOW_NO_API_KEY=$(sed -n 's/^ALLOW_NO_API_KEY=//p' "$INSTALL_DIR/.env" | head -n 1)
 fi
 if [ -z "${OLLAMA_API_KEY:-}" ] && [ "${ALLOW_NO_API_KEY:-0}" != "1" ]; then
   [ "$NONINTERACTIVE" != "1" ] || die "OLLAMA_API_KEY absent. Pour un test sans IA : ALLOW_NO_API_KEY=1."
@@ -1053,12 +1057,18 @@ fi
 
 EXISTING_IDE_PASSWORD=""
 EXISTING_OLLAMA_MODEL=""
+EXISTING_NO_KEY=""
+EXISTING_KEEP=""
 if [ -f "$INSTALL_DIR/.env" ]; then
   EXISTING_IDE_PASSWORD=$(sed -n 's/^CODE_SERVER_PASSWORD=//p' "$INSTALL_DIR/.env")
   EXISTING_OLLAMA_MODEL=$(sed -n 's/^OLLAMA_MODEL=//p' "$INSTALL_DIR/.env")
+  EXISTING_NO_KEY=$(sed -n 's/^ALLOW_NO_API_KEY=//p' "$INSTALL_DIR/.env")
+  EXISTING_KEEP=$(sed -n 's/^SNAPSHOT_KEEP=//p' "$INSTALL_DIR/.env")
 fi
 CODE_SERVER_PASSWORD="${CODE_SERVER_PASSWORD:-${EXISTING_IDE_PASSWORD:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-${EXISTING_OLLAMA_MODEL:-glm-5.3-flash}}"
+ALLOW_NO_API_KEY="${ALLOW_NO_API_KEY:-${EXISTING_NO_KEY:-0}}"
+SNAPSHOT_KEEP="${SNAPSHOT_KEEP:-${EXISTING_KEEP:-3}}"
 cat > "$INSTALL_DIR/.env" <<EOF
 # Généré par setup.sh le $(date -Iseconds)
 OLLAMA_API_KEY=${OLLAMA_API_KEY}
@@ -2330,7 +2340,11 @@ if [ "$FIX" -eq 1 ]; then
 
   if [ "$NEED_REINSTALL" -eq 1 ] && [ -x ./setup.sh ]; then
     warn "Fichiers ou image Docker manquants → relance de setup.sh en mode repair"
-    FORCE_ACTION=repair NONINTERACTIVE=1 bash ./setup.sh
+    # Préserver la config permanente (mode sans IA) pour la relance
+    ALLOW_NO_API_KEY=$(sed -n 's/^ALLOW_NO_API_KEY=//p' .env 2>/dev/null | head -n 1)
+    SNAPSHOT_KEEP=$(sed -n 's/^SNAPSHOT_KEEP=//p' .env 2>/dev/null | head -n 1)
+    env ALLOW_NO_API_KEY="${ALLOW_NO_API_KEY:-}" SNAPSHOT_KEEP="${SNAPSHOT_KEEP:-}" \
+        FORCE_ACTION=repair NONINTERACTIVE=1 bash ./setup.sh
   elif [ "$NEED_REINSTALL" -eq 1 ] && [ ! -x ./setup.sh ]; then
     bad "setup.sh n'est pas présent dans $(pwd)."
     echo "  Relancez l'installation complète :"

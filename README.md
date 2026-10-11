@@ -4,10 +4,10 @@
 
 **Une plateforme d'agents IA auto-hébergée — Claude Code + Codex, dans le navigateur, depuis n'importe où.**
 
-> Correctifs locaux v1.4.6 : utiliser `sudo bash ./setup.sh` depuis cette copie
-> pour profiter des corrections Docker/Caddy. Les liens GitHub ci-dessous ne
-> contiennent ces corrections qu'après publication. Le test Debian de 2 Go et
-> les commandes de suppression de sa VM sont documentés dans
+> v1.4.7 : les correctifs Docker/Caddy de la v1.4.6 et la réparation
+> `doctor --fix` pour les installations sans clé API sont inclus dans ce dépôt.
+> Le test Debian de 2 Go et les commandes de suppression de sa VM sont
+> documentés dans
 > [GUIDE-DEBIAN-VIERGE.md](./GUIDE-DEBIAN-VIERGE.md#test-local-debian-avec-2-go-de-ram).
 
 > Configuration : copier [.env.example](./.env.example) vers `.env`, puis
